@@ -5,16 +5,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import _softmax_backward_data as _softmax_backward_data
 from torch.utils import checkpoint
-from transformers import PreTrainedModel, AutoConfig
+from transformers import PreTrainedModel
 from transformers.modeling_outputs import MaskedLMOutput
-from transformers import AutoModelForMaskedLM
+from ltg_bert_config import LtgBertConfig
 
 
 class LtgBertForMaskedLM(PreTrainedModel):
     """
     Custom BERT model for Masked Language Modeling that subclasses PreTrainedModel
     """
-    def __init__(self, config, classifier="basic", activation_checkpointing=False):
+    config_class = LtgBertConfig
+    base_model_prefix = "ltg_bert"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["EncoderLayer"]
+
+    def __init__(self, config: LtgBertConfig, classifier="basic", activation_checkpointing=False):
         super().__init__(config)
         self.config = config
         self.embedding = Embedding(config)
@@ -27,6 +32,26 @@ class LtgBertForMaskedLM(PreTrainedModel):
         
         # Initialize weights
         self.post_init()
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            # Initialize linear layers with truncated normal distribution
+            std = math.sqrt(2.0 / (5.0 * module.in_features))
+            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            # Initialize embedding layers with truncated normal distribution
+            std = math.sqrt(2.0 / (5.0 * module.embedding_dim))
+            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+        elif isinstance(module, nn.LayerNorm):
+            # LayerNorm layers are already initialized correctly by PyTorch
+            pass
+        elif isinstance(module, nn.Parameter):
+            # Initialize parameter tensors (like relative embeddings)
+            std = math.sqrt(2.0 / (5.0 * module.size(-1)))
+            nn.init.trunc_normal_(module, mean=0.0, std=std, a=-2*std, b=2*std)
 
     def get_contextualized(self, input_ids, attention_mask):
         # Transpose input_ids from [batch_size, seq_len] to [seq_len, batch_size]
@@ -95,26 +120,10 @@ class LtgBertForMaskedLM(PreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.classifier.nonlinearity[-1] = new_embeddings
 
-
-# Keep the legacy Bert class for backward compatibility
-class Bert(BertForMaskedLM):
-    """Legacy wrapper for backward compatibility"""
-    def __init__(self, config, classifier="basic", activation_checkpointing=False):
-        super().__init__(config, classifier, activation_checkpointing)
-    
-    def forward(self, input_ids, attention_mask, masked_lm_labels=None):
-        """Legacy forward method that returns tuple instead of MaskedLMOutput"""
-        outputs = super().forward(input_ids, attention_mask, labels=masked_lm_labels)
-        
-        if self.next_sentence_classifier:
-            # Get contextualized embeddings for next sentence prediction
-            contextualized_embeddings = self.get_contextualized(input_ids, attention_mask)[-1].transpose(0, 1)
-            next_sentence_prediction = self.next_sentence_classifier(contextualized_embeddings)
-        else:
-            next_sentence_prediction = None
-            
-        return outputs.logits, next_sentence_prediction
-
+    def register_for_auto_class(self):
+        from transformers import AutoConfig, AutoModelForMaskedLM
+        AutoConfig.register("ltg_bert", LtgBertConfig)
+        AutoModelForMaskedLM.register(LtgBertConfig, LtgBertForMaskedLM)
 
 class Encoder(nn.Module):
     def __init__(self, config, activation_checkpointing=False):
@@ -383,6 +392,11 @@ class Embedding(nn.Module):
         return word_embedding, relative_embeddings
 
 
-# Register the model for AutoModelForMaskedLM
-# This allows the model to be used with the transformers AutoModel classes
-AutoModelForMaskedLM.register("bert-custom", BertForMaskedLM)
+# Register the model configuration
+from transformers import AutoConfig, AutoModelForMaskedLM
+
+# Register the configuration
+AutoConfig.register("ltg_bert", LtgBertConfig)
+
+# Register the model
+AutoModelForMaskedLM.register(LtgBertConfig, LtgBertForMaskedLM)

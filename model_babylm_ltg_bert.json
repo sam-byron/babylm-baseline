@@ -2,7 +2,7 @@
     "block_size": 512,
     "batch_size": 24,
     "grad_accum": 4,
-    "num_epochs": 5,
+    "num_epochs": 10,
     "vocab_size": 16384,
     "dataset_split": "train",
     "learning_rate": 0.0002,

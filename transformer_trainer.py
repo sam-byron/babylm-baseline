@@ -20,8 +20,17 @@ from datetime import timedelta
 from config import BertConfig
 
 from ltg_bert import LtgBertForMaskedLM
+from ltg_bert_config import LtgBertConfig
+from save_config import save_ltg_bert_config
 
 from tokenizer import Tokenizer
+
+# # Set CUDA_HOME to avoid DeepSpeed compilation issues
+# import os
+# os.environ.setdefault('CUDA_HOME', '/usr/local/cuda-12.9')
+# # Disable DeepSpeed compilation since we don't have nvcc
+# os.environ.setdefault('DS_BUILD_OPS', '0')
+# os.environ.setdefault('DS_SKIP_CUDA_CHECK', '1')
 
 # ===== Simple ANSI color helper =====
 class C:
@@ -42,28 +51,20 @@ class EmptyDataset(Dataset):
         raise IndexError
 
 # @torch.compile
-def build_model(config):
-    # Load custom config
-    custom_config = BertConfig.from_json_file("./configs/base.json")
-    print(f"{C.CYAN}Loaded BERT config from {"./configs/base.json"}{C.RESET}")
+def build_model(checkpoint_path):
+    # Use the proper config saving function from save_config.py
+    save_ltg_bert_config("./configs/base.json", checkpoint_path)
     
-    # Convert to transformers BertConfig
-    transformers_config = TransformersBertConfig(
-        vocab_size=custom_config.vocab_size,
-        hidden_size=custom_config.hidden_size,
-        num_hidden_layers=custom_config.num_hidden_layers,
-        num_attention_heads=custom_config.num_attention_heads,
-        intermediate_size=custom_config.intermediate_size,
-        max_position_embeddings=custom_config.max_position_embeddings,
-        attention_probs_dropout_prob=custom_config.attention_probs_dropout_prob,
-        hidden_dropout_prob=custom_config.hidden_dropout_prob,
-        layer_norm_eps=custom_config.layer_norm_eps,
-    )
-    
-    # Add custom attributes needed by our model
-    transformers_config.position_bucket_size = custom_config.position_bucket_size
+    # Load the saved config
+    transformers_config = LtgBertConfig.from_pretrained(checkpoint_path)
+    print(f"{C.CYAN}Loaded and saved LtgBertConfig to {checkpoint_path}{C.RESET}")
     
     model = LtgBertForMaskedLM(transformers_config)
+
+    # Save model state dict manually to avoid DeepSpeed issues
+    os.makedirs(checkpoint_path, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
+    print(f"{C.GREEN}Model weights saved to {checkpoint_path}/pytorch_model.bin{C.RESET}")
 
     return model
 
@@ -84,6 +85,7 @@ def train_loop(
 ):
     # save tokenizer
     # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
+    os.makedirs(checkpoint_path, exist_ok=True)  # Ensure directory exists
     tokenizer_dest = os.path.join(checkpoint_path, "tokenizer.json")
     tokenizer.save(tokenizer_dest)
     # Use accelerator.print to avoid N prints across ranks
@@ -95,7 +97,7 @@ def train_loop(
 
     # 1) Compute number of steps and total tokens for ETA
     steps_per_epoch = len(train_loader)
-    save_steps = max(1, steps_per_epoch // 50)
+    save_steps = max(1, steps_per_epoch // 5)
     print(f"{C.BLUE}Total steps per epoch: {steps_per_epoch}, save every {save_steps} steps{C.RESET}")
     # val_log_steps = max(1, steps_per_epoch // 200)
     # print(f"{C.BLUE}Validation every {val_log_steps} steps{C.RESET}")
@@ -262,16 +264,22 @@ def train_loop(
                         })
                 if step % save_steps == 0 and step > 0:
                     # Save the model state and optimizer only on the main process
-                    accelerator.wait_for_everyone()
                     if is_main:
                         try:
+                            print(f"{C.CYAN}[Checkpoint] Starting save at step {step}...{C.RESET}")
+                            print(f"{C.CYAN}[Checkpoint] accelerator.save_state to {checkpoint_path}{C.RESET}")
                             accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
+                            print(f"{C.CYAN}[Checkpoint] accelerator.save_model to {checkpoint_path}{C.RESET}")
+                            accelerator.save_model(model, checkpoint_path)
                             unwrapped = accelerator.unwrap_model(model)
-                            unwrapped.save_pretrained(checkpoint_path)
+                            print(f"{C.CYAN}[Checkpoint] unwrapped.save_pretrained to {checkpoint_path}{C.RESET}")
+                            # unwrapped.save_pretrained(checkpoint_path)
+                            torch.save(unwrapped.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
                             print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer at step {step}{C.RESET}")
                         except Exception as e:
                             print(f"{C.YELLOW}[Checkpoint] Warning: failed to save at step {step}: {e}{C.RESET}")
-                    accelerator.wait_for_everyone()
+                            import traceback
+                            traceback.print_exc()
         
         batch_bar.close()
         loss_bar.close()
@@ -282,10 +290,10 @@ def train_loop(
             try:
                 accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
                 unwrapped = accelerator.unwrap_model(model)
-                unwrapped.save_pretrained(checkpoint_path)
+                # unwrapped.save_pretrained(checkpoint_path)
+                torch.save(unwrapped.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
                 # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
                 tokenizer_dest = os.path.join(checkpoint_path, "tokenizer.json")
-                tokenizer.save(tokenizer_dest)
                 print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer{C.RESET}")
             except Exception as e:
                 print(f"{C.YELLOW}[Checkpoint] Warning: failed to save: {e}{C.RESET}")
@@ -351,7 +359,7 @@ def main():
     train_loader, val_loader, test_loader, collate_fn, total_tokens_train = data_loader(config, tokenizer, config["cache_path"])
     print(f"{C.GREEN}Data loaders created successfully{C.RESET}")
     # Build the GPT-2 model from scratch based on our config
-    model = build_model(config)
+    model = build_model(checkpoint_path)
 
     # Optimizer with LR scaling and weight-decay fix
     base_lr = float(config.get("learning_rate", 5e-5))
