@@ -372,7 +372,13 @@ def data_loader(config, tokenizer, cache_path):
     # Custom MLM collator for tokenizers.Tokenizer
     def collate_fn_with_mask(examples):
         # examples is a list of token ID lists
-        input_ids = [torch.tensor(ex, dtype=torch.long) for ex in examples]
+        # Convert to tensors properly - check if already tensor or list
+        input_ids = []
+        for ex in examples:
+            if isinstance(ex, torch.Tensor):
+                input_ids.append(ex.detach().clone())
+            else:
+                input_ids.append(torch.tensor(ex, dtype=torch.long))
         
         # Pad sequences to the same length
         max_len = max(len(seq) for seq in input_ids)
@@ -439,11 +445,11 @@ def data_loader(config, tokenizer, cache_path):
         train_ds,
         # batch_sampler=train_batch_sampler,
         batch_size=config["batch_size"],
-        num_workers=12,
+        num_workers=2,  # Reduced to avoid deadlocks
         pin_memory=True,
         collate_fn=collate_fn_with_mask,  # or collate_fn_with_mask if you prefer explicit mask
-        prefetch_factor=6,
-        persistent_workers=True,
+        prefetch_factor=2,  # Reduced prefetch factor
+        persistent_workers=False,  # Disabled to avoid multiprocessing issues
         drop_last=True,  # optional: move drop_last here if you want strict batch shapes
     )
 

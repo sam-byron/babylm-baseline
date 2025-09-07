@@ -7,9 +7,10 @@ from torch import _softmax_backward_data as _softmax_backward_data
 from torch.utils import checkpoint
 from transformers import PreTrainedModel, AutoConfig
 from transformers.modeling_outputs import MaskedLMOutput
+from transformers import AutoModelForMaskedLM
 
 
-class BertForMaskedLM(PreTrainedModel):
+class LtgBertForMaskedLM(PreTrainedModel):
     """
     Custom BERT model for Masked Language Modeling that subclasses PreTrainedModel
     """
@@ -53,10 +54,25 @@ class BertForMaskedLM(PreTrainedModel):
         if labels is not None:
             # Compute MLM loss
             active_loss = labels.view(-1) != -100
+            num_active = active_loss.sum().item()
             if active_loss.any():
                 active_labels = labels.view(-1)[active_loss]
                 # prediction_scores already contains only predictions for masked tokens
                 loss = F.cross_entropy(prediction_scores, active_labels)
+                
+                # Debug: Print loss computation details for first batch
+                if hasattr(self, '_debug_step_count'):
+                    self._debug_step_count += 1
+                else:
+                    self._debug_step_count = 1
+                    
+                if self._debug_step_count == 1:
+                    print(f"Loss computation debug:")
+                    print(f"  - Active tokens: {num_active}")
+                    print(f"  - Prediction scores shape: {prediction_scores.shape}")
+                    print(f"  - Active labels shape: {active_labels.shape}")
+                    print(f"  - Active labels min/max: {active_labels.min().item()}/{active_labels.max().item()}")
+                    print(f"  - Cross entropy loss: {loss.item()}")
             else:
                 loss = torch.tensor(0.0, device=input_ids.device, requires_grad=True)
         
@@ -221,8 +237,9 @@ class FeedForward(nn.Module):
 
 class MaskedSoftmax(torch.autograd.Function):
     @staticmethod
-    def forward(self, x, mask, dim):
-        self.dim = dim
+    def forward(ctx, x, mask, dim):
+        # Store dim for backward
+        ctx.dim = dim
         # Convert mask to boolean if it's not already
         # Assuming mask is 1 for valid positions, 0 for padding
         # We need to invert it: True for positions to mask (padding)
@@ -234,17 +251,23 @@ class MaskedSoftmax(torch.autograd.Function):
         # mask shape should be: [batch_size, 1, 1, seq_len] or broadcastable
         mask = mask.expand_as(x)
         
-        x.masked_fill_(mask, float('-inf'))
-        x = torch.softmax(x, self.dim)
-        x.masked_fill_(mask, 0.0)
-        self.save_for_backward(x)
-        return x
+        # Use in-place operations more carefully for distributed training
+        x_masked = x.masked_fill(mask, float('-inf'))
+        result = torch.softmax(x_masked, ctx.dim)
+        result = result.masked_fill(mask, 0.0)
+        
+        # Save for backward - be more careful about what we save
+        ctx.save_for_backward(result, mask)
+        return result
 
     @staticmethod
-    def backward(self, grad_output):
-        output, = self.saved_tensors
-        inputGrad = _softmax_backward_data(grad_output, output, self.dim, output.dtype)
-        return inputGrad, None, None
+    def backward(ctx, grad_output):
+        result, mask = ctx.saved_tensors
+        # Use the standard softmax backward implementation
+        grad_input = _softmax_backward_data(grad_output, result, ctx.dim, result.dtype)
+        # Zero out gradients for masked positions
+        grad_input = grad_input.masked_fill(mask, 0.0)
+        return grad_input, None, None
 
 
 class Attention(nn.Module):
@@ -358,3 +381,8 @@ class Embedding(nn.Module):
         word_embedding = self.dropout(self.word_layer_norm(self.word_embedding(input_ids)))
         relative_embeddings = self.relative_layer_norm(self.relative_embedding)
         return word_embedding, relative_embeddings
+
+
+# Register the model for AutoModelForMaskedLM
+# This allows the model to be used with the transformers AutoModel classes
+AutoModelForMaskedLM.register("bert-custom", BertForMaskedLM)
