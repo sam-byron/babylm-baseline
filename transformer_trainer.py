@@ -24,6 +24,9 @@ from ltg_bert_config import LtgBertConfig
 from save_config import save_ltg_bert_config
 
 from tokenizer import Tokenizer
+import shutil
+
+from lamb import Lamb
 
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
 # import os
@@ -50,6 +53,26 @@ class EmptyDataset(Dataset):
     def __getitem__(self, idx): 
         raise IndexError
 
+def save_model_official_way(model, model_config, tokenizer, checkpoint_path):
+    """
+    Save model the official HuggingFace way for compatibility with lm_eval and other tools.
+    """
+    print(f"{C.CYAN}Saving model the official HuggingFace way to {checkpoint_path}{C.RESET}")
+    
+    # Ensure directory exists
+    os.makedirs(checkpoint_path, exist_ok=True)
+    
+    # Register for auto class - this is the key part!
+    model_config.register_for_auto_class()
+    model.register_for_auto_class()  # No arguments needed for models
+    
+    # Save model and config using HF methods
+    # Use safe_serialization=False to handle shared tensors
+    model.save_pretrained(checkpoint_path, safe_serialization=False)
+    model_config.save_pretrained(checkpoint_path)
+    
+    print(f"{C.BOLD}{C.GREEN}Model saved the official HuggingFace way! Ready for lm_eval with trust_remote_code=True{C.RESET}")
+
 # @torch.compile
 def build_model(checkpoint_path):
     # Use the proper config saving function from save_config.py
@@ -61,10 +84,12 @@ def build_model(checkpoint_path):
     
     model = LtgBertForMaskedLM(transformers_config)
 
-    # Save model state dict manually to avoid DeepSpeed issues
-    os.makedirs(checkpoint_path, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
-    print(f"{C.GREEN}Model weights saved to {checkpoint_path}/pytorch_model.bin{C.RESET}")
+    # Copy source files with proper naming convention
+    model_type = transformers_config.model_type
+    # copy ltg_bert.py and ltg_bert_config.py to the checkpoint directory
+    shutil.copy2("ltg_bert.py", checkpoint_path)
+    shutil.copy2("ltg_bert_config.py", checkpoint_path)
+    print(f"{C.GREEN}Model initialized and saved to {checkpoint_path}{C.RESET}")
 
     return model
 
@@ -192,15 +217,6 @@ def train_loop(
                 if accelerator.sync_gradients:
                     if step == 0:
                         accelerator.print(f"{C.YELLOW}Syncing gradients (skipping clipping for debugging)...{C.RESET}")
-                    # Temporarily disable gradient clipping to debug the hang
-                    # try:
-                    #     max_grad_norm = min(config.get("max_grad_norm", 1.0), 1.0)  # Cap at 1.0
-                    #     accelerator.clip_grad_norm_(model.parameters(), max_grad_norm)
-                    #     if step == 0:
-                    #         accelerator.print(f"{C.GREEN}Gradient clipping completed{C.RESET}")
-                    # except Exception as e:
-                    #     if step == 0:
-                    #         accelerator.print(f"{C.RED}Gradient clipping failed: {e}, skipping...{C.RESET}")
                 # Only step optimizer/scheduler when we're at an accumulation boundary
                 if accelerator.sync_gradients:
                     if step == 0:
@@ -272,9 +288,9 @@ def train_loop(
                             print(f"{C.CYAN}[Checkpoint] accelerator.save_model to {checkpoint_path}{C.RESET}")
                             accelerator.save_model(model, checkpoint_path)
                             unwrapped = accelerator.unwrap_model(model)
-                            print(f"{C.CYAN}[Checkpoint] unwrapped.save_pretrained to {checkpoint_path}{C.RESET}")
-                            # unwrapped.save_pretrained(checkpoint_path)
-                            torch.save(unwrapped.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
+                            print(f"{C.CYAN}[Checkpoint] Saving model the official HuggingFace way...{C.RESET}")
+                            # Use the official saving method
+                            save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
                             print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer at step {step}{C.RESET}")
                         except Exception as e:
                             print(f"{C.YELLOW}[Checkpoint] Warning: failed to save at step {step}: {e}{C.RESET}")
@@ -286,38 +302,37 @@ def train_loop(
 
         # End‑of‑epoch checkpoint (main-only, with barriers)
         # accelerator.wait_for_everyone()
-        if accelerator.is_main_process:
-            try:
-                accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
-                unwrapped = accelerator.unwrap_model(model)
-                # unwrapped.save_pretrained(checkpoint_path)
-                torch.save(unwrapped.state_dict(), os.path.join(checkpoint_path, "pytorch_model.bin"))
-                # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
-                tokenizer_dest = os.path.join(checkpoint_path, "tokenizer.json")
-                print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer{C.RESET}")
-            except Exception as e:
-                print(f"{C.YELLOW}[Checkpoint] Warning: failed to save: {e}{C.RESET}")
-            model.eval()
-            with torch.no_grad():
-                total_val_loss = 0.0
-                # max_batches = int(config.get("val_sample_batches", 128))
-                max_batches = len(val_loader)
-                seen = 0
-                # randomize the validation loader to sample different batches each time
-                # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
-                for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
-                    val_outputs = model(
-                        input_ids=val_batch["input_ids"],
-                        attention_mask=val_batch["attention_mask"],
-                        labels=val_batch["labels"],
-                    )
-                    total_val_loss += float(val_outputs.loss.detach())
-                    seen += 1
-                    if seen >= max_batches:
-                        break
+        # if accelerator.is_main_process:
+        try:
+            accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
+            unwrapped = accelerator.unwrap_model(model)
+            # Save the model the official HuggingFace way
+            save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
+            print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer{C.RESET}")
+        except Exception as e:
+            print(f"{C.YELLOW}[Checkpoint] Warning: failed to save: {e}{C.RESET}")
+        
+        # Run validation only on main process with unprepared loader
+        model.eval()
+        with torch.no_grad():
+            total_val_loss = 0.0
+            seen = 0
+            # randomize the validation loader to sample different batches each time
+            # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
+            for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
+                val_outputs = model(
+                    input_ids=val_batch["input_ids"],
+                    attention_mask=val_batch["attention_mask"],
+                    labels=val_batch["labels"],
+                )
+                total_val_loss += float(val_outputs.loss.detach())
+                seen += 1
             if seen > 0:
                 print(f"{C.CYAN}[End-epoch] step {step}: avg_val_loss={total_val_loss/seen:.4f} over {seen} batches{C.RESET}")
-            model.train()
+        model.train()
+    
+        # Wait for main process to finish validation before continuing
+        # accelerator.wait_for_everyone()
         # accelerator.wait_for_everyone()
 
 
@@ -367,7 +382,11 @@ def main():
     world_size = accelerator.num_processes if hasattr(accelerator, "num_processes") else int(os.environ.get("WORLD_SIZE", 1))
     effective_bs = int(config["batch_size"]) * max(1, grad_accum) * max(1, world_size)
     scale = effective_bs / 256.0
-    scaled_lr = max(1e-5, min(base_lr * scale, 3e-4))
+    # scaled_lr = max(1e-5, min(base_lr * scale, 3e-4))
+    scaled_lr = max(0.001, min(base_lr * scale, 3e-4))
+
+    if accelerator.is_main_process:
+        print(f"{C.BLUE}LR base={base_lr:.2e} scaled={scaled_lr:.2e} (effective_bs={effective_bs}){C.RESET}")
 
     no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight"]
     decay_params = []
@@ -379,20 +398,41 @@ def main():
             nodecay_params.append(p)
         else:
             decay_params.append(p)
-    param_groups = [
-        {"params": decay_params, "weight_decay": float(config.get("weight_decay", 0.01)), "lr": scaled_lr},
-        {"params": nodecay_params, "weight_decay": 0.0, "lr": scaled_lr},
-    ]
 
-    if accelerator.is_main_process:
-        print(f"{C.BLUE}LR base={base_lr:.2e} scaled={scaled_lr:.2e} (effective_bs={effective_bs}){C.RESET}")
-
-    optimizer = AdamW(param_groups, lr=scaled_lr, betas=(0.9, 0.999), eps=1e-8)
+    optimizer = None
+    opt_name = config.get("optimizer", "adamw").lower()
+    if opt_name == "adamw":
+        print(f"{C.BLUE}Using AdamW optimizer with weight decay fix{C.RESET}")
+        param_groups = [
+            {"params": decay_params, "weight_decay": float(config.get("weight_decay", 0.01)), "lr": scaled_lr},
+            {"params": nodecay_params, "weight_decay": 0.0, "lr": scaled_lr},
+        ]
+        optimizer = AdamW(param_groups, lr=scaled_lr, betas=(0.9, 0.999), eps=1e-8)
+    elif opt_name == "lamb":
+        print(f"{C.BLUE}Using LAMB optimizer with layer-wise weight decay{C.RESET}")
+        low_decay_params = list(model.embedding.named_parameters()) + list(model.transformer.named_parameters())
+        high_decay_params = list(model.classifier.named_parameters())
+        no_decay = ['bias', 'layer_norm', 'embedding']
+        decay_params = [(n, p) for n, p in low_decay_params if not any(nd in n for nd in no_decay) and "word_embedding" not in n]
+        no_decay_params = [(n, p) for n, p in low_decay_params + high_decay_params if any(nd in n for nd in no_decay) and "word_embedding" not in n]
+        high_decay_params = [(n, p) for n, p in high_decay_params if not any(nd in n for nd in no_decay)]
+        optimizer_grouped_parameters = [
+        {'params': [p for _, p in decay_params], 'weight_decay': config.get("weight_decay", 0.01)},
+        {'params': [p for _, p in high_decay_params], 'weight_decay': config.get("head_weight_decay", 0.01)},
+        {'params': [p for _, p in no_decay_params], 'weight_decay': 0.0}
+        ]
+        optimizer = Lamb(
+            optimizer_grouped_parameters,
+            config.get("learning_rate", 1e-2),
+            betas=(0.9, 0.98),
+            eps=1e-6,
+        )
    
-    # Prepare model, optimizer, and train/test loaders. Leave val_loader unprepared (CPU) for main-only eval.
+    # Prepare model, optimizer, and train/test loaders. Leave val_loader unprepared for main-only eval.
     model, optimizer, train_loader, test_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, test_loader, val_loader
     )
+    # Keep val_loader unprepared to avoid NCCL timeouts during validation
 
     if accelerator.is_main_process:
         # —––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -412,30 +452,20 @@ def main():
     
     # Scheduler with auto warmup fraction if not provided
     total_steps = config["num_epochs"] * len(train_loader)
-    warmup_cfg = int(config.get("warmup_steps", 0))
-    warmup_steps = warmup_cfg if warmup_cfg > 0 else max(1, int(0.06 * total_steps))
+    warmup_cfg = int(config.get("warmup_steps_proportion", 0))
+    # warmup_steps = warmup_cfg if warmup_cfg > 0 else max(1, int(0.06 * total_steps))
     if accelerator.is_main_process and warmup_cfg <= 0:
-        print(f"{C.BLUE}Using warmup_steps={warmup_steps} (~6% of {total_steps} steps){C.RESET}")
+        print(f"{C.BLUE}Using warmup_steps_proportion={warmup_cfg}% of {total_steps} steps{C.RESET}")
 
     scheduler = get_scheduler(
         "cosine",
         optimizer=optimizer,
-        num_warmup_steps=warmup_steps,
+        num_warmup_steps=warmup_cfg*total_steps,
         num_training_steps=total_steps,
     )
 
     # Ensure the scheduler is part of the checkpoint state
     # accelerator.register_for_checkpointing(scheduler)
-
-    # # Robust checkpoint loading with a broadcasted decision to avoid divergence
-    # has_ckpt_local = 1 if (checkpoint_path and os.path.isdir(checkpoint_path) and os.listdir(checkpoint_path)) else 0
-    # # Derive a consistent decision across ranks using an all-gather via Accelerate
-    # local_flag = torch.tensor([has_ckpt_local], device=accelerator.device, dtype=torch.int64)
-    # if hasattr(accelerator, "num_processes") and accelerator.num_processes > 1:
-    #     all_flags = accelerator.gather(local_flag)
-    #     has_ckpt = bool(int(all_flags.max().item()))
-    # else:
-    #     has_ckpt = bool(int(local_flag.item()))
 
     if checkpoint_path and os.path.isdir(checkpoint_path) and os.listdir(checkpoint_path):
         try:
@@ -463,7 +493,7 @@ def main():
         accelerator.print(f"{C.YELLOW}No checkpoint found at {checkpoint_path}, starting from scratch.{C.RESET}")
 
     start_epoch = 0
-
+    # train_loader = test_loader
     train_loop(accelerator, model, tokenizer, train_loader, val_loader, optimizer, scheduler, config, checkpoint_path, start_epoch)
 
 

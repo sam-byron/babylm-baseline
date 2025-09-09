@@ -83,6 +83,8 @@ class LtgBertConfig(PretrainedConfig):
         layer_norm_eps: float = 1e-7,
         use_cache: bool = True,
         classifier_dropout: Optional[float] = None,
+        num_labels: int = 2,
+        problem_type: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -99,6 +101,8 @@ class LtgBertConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.use_cache = use_cache
         self.classifier_dropout = classifier_dropout
+        self.num_labels = num_labels
+        self.problem_type = problem_type
 
         # Validate configuration
         if hidden_size % num_attention_heads != 0:
@@ -245,29 +249,37 @@ class LtgBertConfig(PretrainedConfig):
 
 # Register the configuration with transformers auto classes
 def register_ltg_bert():
-    """Register LtgBertConfig and LtgBertForMaskedLM with transformers auto classes."""
+    """Register LtgBertConfig and LtgBert models with transformers auto classes."""
     try:
-        from transformers import AutoConfig, AutoModelForMaskedLM
+        from transformers import AutoConfig, AutoModelForMaskedLM, AutoModelForSequenceClassification
         
-        # Register the config
-        if "ltg_bert" not in AutoConfig._name_to_class:
+        # Register the config - use more robust checking
+        try:
+            # Check if already registered by trying to get it
+            AutoConfig.get_config_class("ltg_bert")
+        except (KeyError, AttributeError):
+            # Not registered yet, so register it
             AutoConfig.register("ltg_bert", LtgBertConfig)
         
-        # Register the model - we need to import it here to avoid circular imports
+        # Register the models - we need to import it here to avoid circular imports
         try:
             from . import ltg_bert
             if hasattr(ltg_bert, 'LtgBertForMaskedLM'):
                 AutoModelForMaskedLM.register(LtgBertConfig, ltg_bert.LtgBertForMaskedLM)
+            if hasattr(ltg_bert, 'LtgBertForSequenceClassification'):
+                AutoModelForSequenceClassification.register(LtgBertConfig, ltg_bert.LtgBertForSequenceClassification)
         except ImportError:
             # Fallback for when imported as a module
             try:
                 import ltg_bert
                 if hasattr(ltg_bert, 'LtgBertForMaskedLM'):
                     AutoModelForMaskedLM.register(LtgBertConfig, ltg_bert.LtgBertForMaskedLM)
+                if hasattr(ltg_bert, 'LtgBertForSequenceClassification'):
+                    AutoModelForSequenceClassification.register(LtgBertConfig, ltg_bert.LtgBertForSequenceClassification)
             except ImportError:
                 pass
                 
-        print("LtgBert configuration and model registered successfully")
+        print("LtgBert configuration and models registered successfully")
     except Exception as e:
         print(f"Warning: Failed to register LtgBert classes: {e}")
 

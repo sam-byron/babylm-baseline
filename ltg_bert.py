@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import _softmax_backward_data as _softmax_backward_data
 from torch.utils import checkpoint
 from transformers import PreTrainedModel
-from transformers.modeling_outputs import MaskedLMOutput
+from transformers.modeling_outputs import MaskedLMOutput, SequenceClassifierOutput
 from ltg_bert_config import LtgBertConfig
 
 
@@ -124,6 +124,121 @@ class LtgBertForMaskedLM(PreTrainedModel):
         from transformers import AutoConfig, AutoModelForMaskedLM
         AutoConfig.register("ltg_bert", LtgBertConfig)
         AutoModelForMaskedLM.register(LtgBertConfig, LtgBertForMaskedLM)
+
+
+class LtgBertForSequenceClassification(PreTrainedModel):
+    """
+    Custom BERT model for Sequence Classification that subclasses PreTrainedModel
+    """
+    config_class = LtgBertConfig
+    base_model_prefix = "ltg_bert"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["EncoderLayer"]
+
+    def __init__(self, config: LtgBertConfig, activation_checkpointing=False):
+        super().__init__(config)
+        self.config = config
+        self.num_labels = config.num_labels
+        
+        # Shared BERT components
+        self.embedding = Embedding(config)
+        self.transformer = Encoder(config, activation_checkpointing)
+        
+        # Classification head
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        
+        # Initialize weights
+        self.post_init()
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if isinstance(module, nn.Linear):
+            # Initialize linear layers with truncated normal distribution
+            std = math.sqrt(2.0 / (5.0 * module.in_features))
+            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            # Initialize embedding layers with truncated normal distribution
+            std = math.sqrt(2.0 / (5.0 * module.embedding_dim))
+            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
+        elif isinstance(module, nn.LayerNorm):
+            # LayerNorm layers are already initialized correctly by PyTorch
+            pass
+        elif isinstance(module, nn.Parameter):
+            # Initialize parameter tensors (like relative embeddings)
+            std = math.sqrt(2.0 / (5.0 * module.size(-1)))
+            nn.init.trunc_normal_(module, mean=0.0, std=std, a=-2*std, b=2*std)
+
+    def get_contextualized(self, input_ids, attention_mask):
+        # Transpose input_ids from [batch_size, seq_len] to [seq_len, batch_size]
+        input_ids = input_ids.transpose(0, 1)
+        static_embeddings, relative_embedding = self.embedding(input_ids)
+        # attention_mask should be [batch_size, 1, 1, seq_len] for broadcasting
+        # Convert from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
+        if attention_mask.dim() == 2:
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+        contextualized_embeddings = self.transformer(static_embeddings, attention_mask, relative_embedding)
+        return contextualized_embeddings
+
+    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        """
+        Forward pass that returns SequenceClassifierOutput for compatibility with transformers
+        """
+        contextualized_embeddings = self.get_contextualized(input_ids, attention_mask)[-1]
+        # Transpose back from [seq_len, batch_size, hidden_size] to [batch_size, seq_len, hidden_size]
+        contextualized_embeddings = contextualized_embeddings.transpose(0, 1)
+        
+        # Use [CLS] token representation (first token) for classification
+        # Shape: [batch_size, hidden_size]
+        cls_representation = contextualized_embeddings[:, 0, :]
+        
+        # Apply dropout and classifier
+        cls_representation = self.dropout(cls_representation)
+        logits = self.classifier(cls_representation)
+        
+        loss = None
+        if labels is not None:
+            # Determine problem type without modifying config
+            problem_type = self.config.problem_type
+            if problem_type is None:
+                if self.num_labels == 1:
+                    problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    problem_type = "single_label_classification"
+                else:
+                    problem_type = "multi_label_classification"
+
+            if problem_type == "regression":
+                loss_fct = nn.MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif problem_type == "single_label_classification":
+                loss_fct = nn.CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif problem_type == "multi_label_classification":
+                loss_fct = nn.BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+        
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=None,
+            attentions=None,
+        )
+
+    def get_input_embeddings(self):
+        return self.embedding.word_embedding
+
+    def set_input_embeddings(self, value):
+        self.embedding.word_embedding = value
+
 
 class Encoder(nn.Module):
     def __init__(self, config, activation_checkpointing=False):
@@ -393,10 +508,11 @@ class Embedding(nn.Module):
 
 
 # Register the model configuration
-from transformers import AutoConfig, AutoModelForMaskedLM
+from transformers import AutoConfig, AutoModelForMaskedLM, AutoModelForSequenceClassification
 
 # Register the configuration
 AutoConfig.register("ltg_bert", LtgBertConfig)
 
-# Register the model
+# Register the models
 AutoModelForMaskedLM.register(LtgBertConfig, LtgBertForMaskedLM)
+AutoModelForSequenceClassification.register(LtgBertConfig, LtgBertForSequenceClassification)

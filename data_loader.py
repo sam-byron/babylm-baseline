@@ -369,7 +369,137 @@ def data_loader(config, tokenizer, cache_path):
     if mask_token_id is None:
         raise ValueError("MASK token not found in tokenizer vocabulary")
     
-    # Custom MLM collator for tokenizers.Tokenizer
+    # Import masking strategies from mlm_dataset
+    from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
+    
+    # Get masking strategy from config (default to "span")
+    masking_strategy_name = config.get("masking_strategy", "span")
+    
+    # Initialize the appropriate masking strategy
+    n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
+    mask_p = config.get("mask_p", 0.15)  # 15% masking probability
+    random_p = config.get("random_p", 0.1)  # 10% random token replacement
+    keep_p = config.get("keep_p", 0.1)  # 10% keep original token
+    
+    masking_strategies = {
+        "span": SpanMaskingStrategy,
+        "subword": SubwordMaskingStrategy,
+        "whole_word": WholeWordMaskingStrategy,
+    }
+    
+    if masking_strategy_name not in masking_strategies:
+        raise ValueError(f"Unknown masking strategy: {masking_strategy_name}. Choose from {list(masking_strategies.keys())}")
+    
+    masking_strategy_class = masking_strategies[masking_strategy_name]
+    masking_strategy = masking_strategy_class(
+        mask_p=mask_p,
+        tokenizer=tokenizer,
+        n_special_tokens=n_special_tokens,
+        padding_label_id=-100,
+        random_p=random_p,
+        keep_p=keep_p
+    )
+    
+    print(f"{C.BLUE}Using {masking_strategy_name} masking strategy (mask_p={mask_p}, random_p={random_p}, keep_p={keep_p}){C.RESET}")
+    
+    # Custom MLM collator using the chosen masking strategy
+    def collate_fn_with_advanced_mask(examples):
+        # examples is a list of token ID lists
+        # Convert to tensors properly - check if already tensor or list
+        input_ids = []
+        for ex in examples:
+            if isinstance(ex, torch.Tensor):
+                input_ids.append(ex.detach().clone())
+            else:
+                input_ids.append(torch.tensor(ex, dtype=torch.long))
+        
+        # Pad sequences to the same length
+        max_len = max(len(seq) for seq in input_ids)
+        padded_input_ids = []
+        attention_masks = []
+        all_labels = []
+        
+        for seq in input_ids:
+            # Pad sequence
+            padding_length = max_len - len(seq)
+            padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
+            
+            # Apply the chosen masking strategy to the padded sequence
+            masked_tokens, labels = masking_strategy(padded_seq)
+            
+            padded_input_ids.append(masked_tokens)
+            all_labels.append(labels)
+            
+            # Create attention mask (1 for real tokens, 0 for padding)
+            attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
+                                      torch.zeros(padding_length, dtype=torch.long)])
+            attention_masks.append(attention_mask)
+        
+        # Stack into batch tensors
+        input_ids_batch = torch.stack(padded_input_ids)
+        attention_mask_batch = torch.stack(attention_masks)
+        labels_batch = torch.stack(all_labels)
+        
+        return {
+            "input_ids": input_ids_batch,
+            "attention_mask": attention_mask_batch,
+            "labels": labels_batch,
+        }
+
+    # Legacy span masking function (kept for backward compatibility)
+    span_masking_strategy = SpanMaskingStrategy(
+        mask_p=0.15,  # 15% masking probability
+        tokenizer=tokenizer,
+        n_special_tokens=n_special_tokens,
+        padding_label_id=-100,
+        random_p=0.1,  # 10% random token replacement
+        keep_p=0.1     # 10% keep original token
+    )
+    
+    def collate_fn_with_span_mask(examples):
+        # examples is a list of token ID lists
+        # Convert to tensors properly - check if already tensor or list
+        input_ids = []
+        for ex in examples:
+            if isinstance(ex, torch.Tensor):
+                input_ids.append(ex.detach().clone())
+            else:
+                input_ids.append(torch.tensor(ex, dtype=torch.long))
+        
+        # Pad sequences to the same length
+        max_len = max(len(seq) for seq in input_ids)
+        padded_input_ids = []
+        attention_masks = []
+        all_labels = []
+        
+        for seq in input_ids:
+            # Pad sequence
+            padding_length = max_len - len(seq)
+            padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
+            
+            # Apply span masking to the padded sequence
+            masked_tokens, labels = span_masking_strategy(padded_seq)
+            
+            padded_input_ids.append(masked_tokens)
+            all_labels.append(labels)
+            
+            # Create attention mask (1 for real tokens, 0 for padding)
+            attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
+                                      torch.zeros(padding_length, dtype=torch.long)])
+            attention_masks.append(attention_mask)
+        
+        # Stack into batch tensors
+        input_ids_batch = torch.stack(padded_input_ids)
+        attention_mask_batch = torch.stack(attention_masks)
+        labels_batch = torch.stack(all_labels)
+        
+        return {
+            "input_ids": input_ids_batch,
+            "attention_mask": attention_mask_batch,
+            "labels": labels_batch,
+        }
+
+    # Keep the original collate function as fallback
     def collate_fn_with_mask(examples):
         # examples is a list of token ID lists
         # Convert to tensors properly - check if already tensor or list
@@ -447,7 +577,7 @@ def data_loader(config, tokenizer, cache_path):
         batch_size=config["batch_size"],
         num_workers=2,  # Reduced to avoid deadlocks
         pin_memory=True,
-        collate_fn=collate_fn_with_mask,  # or collate_fn_with_mask if you prefer explicit mask
+        collate_fn=collate_fn_with_advanced_mask,  # Use configurable masking strategy
         prefetch_factor=2,  # Reduced prefetch factor
         persistent_workers=False,  # Disabled to avoid multiprocessing issues
         drop_last=True,  # optional: move drop_last here if you want strict batch shapes
@@ -457,14 +587,14 @@ def data_loader(config, tokenizer, cache_path):
 
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
                                num_workers=2, pin_memory=True,
-                               collate_fn=collate_fn_with_mask, drop_last=True)
+                               collate_fn=collate_fn_with_advanced_mask, drop_last=True)  # Use configurable masking for validation too
     test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False,
                                num_workers=2, pin_memory=True,
-                               collate_fn=collate_fn_with_mask, drop_last=True)
+                               collate_fn=collate_fn_with_advanced_mask, drop_last=True)  # Use configurable masking for test too
 
     print(f"{C.CYAN}Data preparation complete. Train files: {len(train_paths)}, Val files: {len(val_paths)}, Test files: {len(test_paths)}{C.RESET}")
 
-    return train_loader, val_loader, test_loader, collate_fn_with_mask, total_tokens_train
+    return train_loader, val_loader, test_loader, collate_fn_with_advanced_mask, total_tokens_train
     # return val_loader, val_loader, test_loader, collate_fn, total_tokens_val
 
 if __name__ == "__main__":
