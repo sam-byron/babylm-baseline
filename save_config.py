@@ -29,10 +29,11 @@ def save_ltg_bert_config(custom_config_path, output_path):
     transformers_config.position_bucket_size = custom_config.position_bucket_size
     
     # Add transformers-specific fields
-    transformers_config.architectures = ["LtgBertForMaskedLM"]
+    transformers_config.architectures = ["LtgBertForMaskedLM", "LtgBertForSequenceClassification"]
     transformers_config.auto_map = {
         "AutoConfig": "ltg_bert_config.LtgBertConfig",
-        "AutoModelForMaskedLM": "ltg_bert.LtgBertForMaskedLM"
+        "AutoModelForMaskedLM": "ltg_bert.LtgBertForMaskedLM",
+        "AutoModelForSequenceClassification": "ltg_bert.LtgBertForSequenceClassification"
     }
     transformers_config.torch_dtype = "float32"
     transformers_config.transformers_version = transformers.__version__

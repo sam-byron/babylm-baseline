@@ -49,6 +49,14 @@ class LtgBertConfig(PretrainedConfig):
             relevant if `config.is_decoder=True`.
         classifier_dropout (`float`, *optional*):
             The dropout ratio for the classification head.
+        share_layer_weights (`bool`, *optional*, defaults to `False`):
+            Whether to share weights across transformer layers (ALBERT-style). When enabled, all transformer
+            layers share the same parameters, significantly reducing model size while potentially improving
+            generalization for limited data scenarios.
+        use_dynamic_masking (`bool`, *optional*, defaults to `False`):
+            Whether to use RoBERTa-style dynamic masking. When enabled, tokens are masked differently on
+            each epoch rather than using static pre-computed masks, effectively multiplying the training
+            signal without requiring additional data.
 
     Examples:
 
@@ -85,6 +93,8 @@ class LtgBertConfig(PretrainedConfig):
         classifier_dropout: Optional[float] = None,
         num_labels: int = 2,
         problem_type: Optional[str] = None,
+        share_layer_weights: bool = False,
+        use_dynamic_masking: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -103,6 +113,8 @@ class LtgBertConfig(PretrainedConfig):
         self.classifier_dropout = classifier_dropout
         self.num_labels = num_labels
         self.problem_type = problem_type
+        self.share_layer_weights = share_layer_weights
+        self.use_dynamic_masking = use_dynamic_masking
 
         # Validate configuration
         if hidden_size % num_attention_heads != 0:

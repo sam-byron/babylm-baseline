@@ -243,25 +243,50 @@ class LtgBertForSequenceClassification(PreTrainedModel):
 class Encoder(nn.Module):
     def __init__(self, config, activation_checkpointing=False):
         super().__init__()
-        self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
-
-        for i, layer in enumerate(self.layers):
-            layer.mlp.mlp[1].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
-            layer.mlp.mlp[-2].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
-
+        
+        self.config = config
         self.activation_checkpointing = activation_checkpointing
+        
+        if config.share_layer_weights:
+            # ALBERT-style parameter sharing: create only one layer and reuse it
+            self.shared_layer = EncoderLayer(config)
+            self.layers = nn.ModuleList([self.shared_layer for _ in range(config.num_hidden_layers)])
+            print(f"🔄 ALBERT-style parameter sharing enabled: {config.num_hidden_layers} layers sharing weights")
+        else:
+            # Standard approach: each layer has its own parameters
+            self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
+
+        # Apply layer-wise scaling only for non-shared layers
+        if not config.share_layer_weights:
+            for i, layer in enumerate(self.layers):
+                layer.mlp.mlp[1].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
+                layer.mlp.mlp[-2].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
     
     def forward(self, hidden_states, attention_mask, relative_embedding):
         hidden_states = [hidden_states]
-        for layer in self.layers:
-            if self.activation_checkpointing:
-                hidden_states.append(
-                    checkpoint.checkpoint(layer, hidden_states[-1], attention_mask, relative_embedding)
-                )
-            else:
-                hidden_states.append(
-                    layer(hidden_states[-1], attention_mask, relative_embedding)
-                )
+        
+        if self.config.share_layer_weights:
+            # ALBERT-style: use the same layer multiple times
+            for _ in range(self.config.num_hidden_layers):
+                if self.activation_checkpointing:
+                    hidden_states.append(
+                        checkpoint.checkpoint(self.shared_layer, hidden_states[-1], attention_mask, relative_embedding)
+                    )
+                else:
+                    hidden_states.append(
+                        self.shared_layer(hidden_states[-1], attention_mask, relative_embedding)
+                    )
+        else:
+            # Standard: use different layers
+            for layer in self.layers:
+                if self.activation_checkpointing:
+                    hidden_states.append(
+                        checkpoint.checkpoint(layer, hidden_states[-1], attention_mask, relative_embedding)
+                    )
+                else:
+                    hidden_states.append(
+                        layer(hidden_states[-1], attention_mask, relative_embedding)
+                    )
 
         return hidden_states
 

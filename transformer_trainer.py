@@ -96,6 +96,84 @@ def build_model(checkpoint_path):
 import time
 import datetime
 
+class TrainingMonitor:
+    """Monitor training stability and detect issues"""
+    def __init__(self, window_size=20, spike_threshold=0.5, oscillation_threshold=0.1):
+        self.window_size = window_size
+        self.spike_threshold = spike_threshold  # Relative increase that counts as a spike
+        self.oscillation_threshold = oscillation_threshold  # StdDev threshold for oscillation detection
+        
+        self.loss_history = []
+        self.grad_norm_history = []
+        self.lr_history = []
+        
+        self.spike_count = 0
+        self.oscillation_count = 0
+        self.explosion_count = 0
+        
+    def update(self, loss, grad_norm, lr, step):
+        """Update monitoring with new values"""
+        self.loss_history.append(loss)
+        self.grad_norm_history.append(grad_norm)
+        self.lr_history.append(lr)
+        
+        # Keep only recent history
+        if len(self.loss_history) > self.window_size * 2:
+            self.loss_history = self.loss_history[-self.window_size:]
+            self.grad_norm_history = self.grad_norm_history[-self.window_size:]
+            self.lr_history = self.lr_history[-self.window_size:]
+    
+    def check_loss_spike(self):
+        """Detect sudden loss increases"""
+        if len(self.loss_history) < 3:
+            return False, ""
+            
+        recent_loss = self.loss_history[-1]
+        prev_loss = self.loss_history[-2]
+        
+        if prev_loss > 0 and (recent_loss - prev_loss) / prev_loss > self.spike_threshold:
+            self.spike_count += 1
+            return True, f"Loss spike detected: {prev_loss:.4f} → {recent_loss:.4f} (+{((recent_loss-prev_loss)/prev_loss)*100:.1f}%)"
+        return False, ""
+    
+    def check_oscillation(self):
+        """Detect loss oscillation in recent window"""
+        if len(self.loss_history) < self.window_size:
+            return False, ""
+            
+        recent_losses = self.loss_history[-self.window_size:]
+        mean_loss = sum(recent_losses) / len(recent_losses)
+        variance = sum((l - mean_loss) ** 2 for l in recent_losses) / len(recent_losses)
+        std_dev = variance ** 0.5
+        
+        if mean_loss > 0 and (std_dev / mean_loss) > self.oscillation_threshold:
+            self.oscillation_count += 1
+            return True, f"Loss oscillation detected: std/mean = {(std_dev/mean_loss)*100:.1f}% (threshold: {self.oscillation_threshold*100:.1f}%)"
+        return False, ""
+    
+    def check_gradient_explosion(self, max_grad_norm=1.0):
+        """Detect gradient explosion"""
+        if len(self.grad_norm_history) < 2:
+            return False, ""
+            
+        recent_grad = self.grad_norm_history[-1]
+        if recent_grad >= max_grad_norm * 0.98:  # Only trigger very close to actual clipping
+            self.explosion_count += 1
+            return True, f"Gradient norm near explosion: {recent_grad:.4f} (max: {max_grad_norm})"
+        return False, ""
+    
+    def get_stats(self):
+        """Get monitoring statistics"""
+        if not self.loss_history:
+            return "No data yet"
+            
+        recent_loss = self.loss_history[-1]
+        recent_grad = self.grad_norm_history[-1] if self.grad_norm_history else 0
+        recent_lr = self.lr_history[-1] if self.lr_history else 0
+        
+        return (f"Recent: loss={recent_loss:.4f}, grad_norm={recent_grad:.4f}, lr={recent_lr:.2e} | "
+                f"Issues: spikes={self.spike_count}, oscillations={self.oscillation_count}, explosions={self.explosion_count}")
+
 def train_loop(
     accelerator,
     model,
@@ -108,6 +186,14 @@ def train_loop(
     checkpoint_path,
     start_epoch,
 ):
+    # Initialize training monitor with config values
+    monitoring_config = config.get("monitoring", {})
+    monitor = TrainingMonitor(
+        window_size=monitoring_config.get("window_size", 20),
+        spike_threshold=monitoring_config.get("spike_threshold", 0.3),
+        oscillation_threshold=monitoring_config.get("oscillation_threshold", 0.15)
+    )
+    
     # save tokenizer
     # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
     os.makedirs(checkpoint_path, exist_ok=True)  # Ensure directory exists
@@ -215,6 +301,33 @@ def train_loop(
                     accelerator.print(f"{C.GREEN}Backward pass completed{C.RESET}")
                 
                 if accelerator.sync_gradients:
+                    # Calculate gradient norm for monitoring
+                    total_norm = 0.0
+                    for param in model.parameters():
+                        if param.grad is not None:
+                            param_norm = param.grad.data.norm(2)
+                            total_norm += param_norm.item() ** 2
+                    total_norm = total_norm ** (1. / 2)
+                    
+                    # Get current learning rate
+                    current_lr = scheduler.get_last_lr()[0]
+                    
+                    # Update monitor with current metrics
+                    monitor.update(float(loss.detach()), total_norm, current_lr, step)
+                    
+                    # Check for training issues
+                    spike_detected, spike_msg = monitor.check_loss_spike()
+                    oscillation_detected, osc_msg = monitor.check_oscillation()
+                    explosion_detected, exp_msg = monitor.check_gradient_explosion(config.get("max_grad_norm", 1.0))
+                    
+                    # Print warnings for issues
+                    if spike_detected and is_main:
+                        print(f"{C.YELLOW}⚠️  {spike_msg}{C.RESET}")
+                    if oscillation_detected and is_main:
+                        print(f"{C.YELLOW}⚠️  {osc_msg}{C.RESET}")
+                    if explosion_detected and is_main:
+                        print(f"{C.RED}🚨 {exp_msg}{C.RESET}")
+                    
                     if step == 0:
                         accelerator.print(f"{C.YELLOW}Syncing gradients (skipping clipping for debugging)...{C.RESET}")
                 # Only step optimizer/scheduler when we're at an accumulation boundary
@@ -265,10 +378,19 @@ def train_loop(
                     if is_main:
                         batch_bar.update(log_steps)
                         loss_bar.update(1)
+                        
+                        # Add monitoring stats to loss bar
+                        monitor_stats = monitor.get_stats()
                         loss_bar.set_postfix({
                             "loss": f"{loss_value:.4f}",
                             "avg_loss": f"{avg_loss:.4f}",
+                            "monitor": f"S:{monitor.spike_count} O:{monitor.oscillation_count} E:{monitor.explosion_count}"
                         })
+                        
+                        # Print detailed monitor stats every 50 steps
+                        if step % (log_steps * 50) == 0:
+                            accelerator.print(f"{C.CYAN}[Monitor] {monitor_stats}{C.RESET}")
+                        
                         elapsed = time.time() - epoch_start
                         batches_per_sec = processed_batches / elapsed if elapsed > 0 else 0
                         remaining = max(total_batches - processed_batches, 0)
@@ -329,6 +451,14 @@ def train_loop(
                 seen += 1
             if seen > 0:
                 print(f"{C.CYAN}[End-epoch] step {step}: avg_val_loss={total_val_loss/seen:.4f} over {seen} batches{C.RESET}")
+                
+        # Print epoch monitoring summary
+        if is_main:
+            epoch_monitor_stats = monitor.get_stats()
+            print(f"{C.BOLD}{C.GREEN}[Epoch {epoch+1} Summary] {epoch_monitor_stats}{C.RESET}")
+            if monitor.spike_count > 0 or monitor.oscillation_count > 0 or monitor.explosion_count > 0:
+                print(f"{C.YELLOW}⚠️  Training stability issues detected this epoch. Consider reducing learning rate if issues persist.{C.RESET}")
+                
         model.train()
     
         # Wait for main process to finish validation before continuing
@@ -357,7 +487,8 @@ def main():
 
     # Add gradient accumulation and mixed precision - more conservative for custom models
     accelerator = Accelerator(
-        mixed_precision="fp16",  # Use fp16 instead of bf16 for better compatibility
+        mixed_precision="bf16",  # Use bf16 for better stability and performance
+        # mixed_precision="fp16",  # Use fp16 instead of bf16 for better compatibility
         gradient_accumulation_steps=config["grad_accum"],
         dataloader_config=DataLoaderConfiguration(
             even_batches=True,
@@ -375,6 +506,11 @@ def main():
     print(f"{C.GREEN}Data loaders created successfully{C.RESET}")
     # Build the GPT-2 model from scratch based on our config
     model = build_model(checkpoint_path)
+    
+    # # Enable gradient checkpointing for memory efficiency but comes at a speed penalty of 15-20%s
+    # if hasattr(model, 'gradient_checkpointing_enable'):
+    #     model.gradient_checkpointing_enable()
+    #     print(f"{C.BLUE}Enabled gradient checkpointing for memory efficiency{C.RESET}")
 
     # Optimizer with LR scaling and weight-decay fix
     base_lr = float(config.get("learning_rate", 5e-5))
@@ -383,7 +519,7 @@ def main():
     effective_bs = int(config["batch_size"]) * max(1, grad_accum) * max(1, world_size)
     scale = effective_bs / 256.0
     # scaled_lr = max(1e-5, min(base_lr * scale, 3e-4))
-    scaled_lr = max(0.001, min(base_lr * scale, 3e-4))
+    scaled_lr = max(1e-5, min(base_lr * scale, 3e-4))
 
     if accelerator.is_main_process:
         print(f"{C.BLUE}LR base={base_lr:.2e} scaled={scaled_lr:.2e} (effective_bs={effective_bs}){C.RESET}")
@@ -425,7 +561,7 @@ def main():
             optimizer_grouped_parameters,
             config.get("learning_rate", 1e-2),
             betas=(0.9, 0.98),
-            eps=1e-6,
+            eps=1e-8,
         )
    
     # Prepare model, optimizer, and train/test loaders. Leave val_loader unprepared for main-only eval.

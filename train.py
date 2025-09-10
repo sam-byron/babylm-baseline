@@ -160,14 +160,14 @@ def prepare_model_and_optimizer(args, device, local_rank, checkpoint):
             optimizer_grouped_parameters,
             lr=args.learning_rate,
             betas=(0.9, 0.98),
-            eps=1e-6,
+            eps=1e-8,
         )
     elif args.optimizer == "lamb":
         optimizer = Lamb(
             optimizer_grouped_parameters,
             args.learning_rate,
             betas=(0.9, 0.98),
-            eps=1e-6,
+            eps=1e-8,
         )
 
     if args.scheduler == "cosine":
