@@ -54,23 +54,112 @@ def chunked(iterable, size):
             break
 
 def load_md_files_to_dataset(data_dir):
-    """Load all .md files as complete file contents, not line by line"""
+    """Load .md files and extract individual sentences to preserve syntax boundaries"""
+    import re
+    
     pattern = os.path.join(data_dir, "**/*.md")
     md_files = glob.glob(pattern, recursive=True)
     print(f"Found {len(md_files)} .md files")
     
-    texts = []
+    sentences = []
+    total_files_processed = 0
+    
     for file_path in md_files:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
-                if content:  # Only add non-empty content
-                    texts.append(content)
+                if not content:
+                    continue
+                    
+            # Extract sentences from BNC markdown format
+            file_sentences = extract_sentences_from_markdown(content)
+            sentences.extend(file_sentences)
+            total_files_processed += 1
+            
+            if total_files_processed % 100 == 0:
+                print(f"Processed {total_files_processed} files, extracted {len(sentences)} sentences so far")
+                
         except Exception as e:
             print(f"Warning: Could not read {file_path}: {e}")
     
-    print(f"Loaded {len(texts)} text segments (complete files)")
-    return Dataset.from_dict({"text": texts})
+    print(f"Loaded {len(sentences)} sentences from {total_files_processed} files (sentence-aware processing)")
+    print(f"Average sentences per file: {len(sentences) / max(1, total_files_processed):.1f}")
+    
+    # Sample a few sentences for verification
+    print("\nSample sentences:")
+    for i, sentence in enumerate(sentences[:3]):
+        print(f"  {i+1}: {sentence[:100]}{'...' if len(sentence) > 100 else ''}")
+    
+    return Dataset.from_dict({"text": sentences})
+
+def extract_sentences_from_markdown(text):
+    """Extract individual sentences from BNC markdown format, preserving dialogue structure"""
+    import re
+    
+    sentences = []
+    lines = text.strip().split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith('#'):  # Skip empty lines and headers
+            continue
+            
+        # Handle speaker attribution format: "Speaker: 'dialogue'"
+        if ':' in line and "'" in line:
+            # Extract the actual speech content
+            parts = line.split(':', 1)
+            if len(parts) == 2:
+                speech_content = parts[1].strip()
+                
+                # Remove outer quotes if present
+                if speech_content.startswith("'") and speech_content.endswith("'"):
+                    speech_content = speech_content[1:-1]
+                elif speech_content.startswith('"') and speech_content.endswith('"'):
+                    speech_content = speech_content[1:-1]
+                
+                # Split on sentence-ending punctuation while preserving the punctuation
+                sentence_parts = re.split(r'([.!?]+)', speech_content)
+                
+                current_sentence = ""
+                for i, part in enumerate(sentence_parts):
+                    if part.strip():
+                        current_sentence += part
+                        # If this part ends with punctuation, complete the sentence
+                        if re.match(r'[.!?]+', part):
+                            if current_sentence.strip():
+                                sentences.append(current_sentence.strip())
+                            current_sentence = ""
+                
+                # Add any remaining content as a sentence
+                if current_sentence.strip():
+                    sentences.append(current_sentence.strip())
+        else:
+            # Handle non-dialogue text - split on sentence boundaries
+            sentence_parts = re.split(r'([.!?]+)', line)
+            current_sentence = ""
+            for i, part in enumerate(sentence_parts):
+                if part.strip():
+                    current_sentence += part
+                    if re.match(r'[.!?]+', part):
+                        if current_sentence.strip():
+                            sentences.append(current_sentence.strip())
+                        current_sentence = ""
+            
+            if current_sentence.strip():
+                sentences.append(current_sentence.strip())
+    
+    # Filter out very short sentences and clean up
+    cleaned_sentences = []
+    for sentence in sentences:
+        # Remove special tokens and clean up
+        cleaned = re.sub(r'\[UNK\]', '', sentence)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        # Keep sentences with at least 3 words (reduced from 3 to handle shorter sentences)
+        if len(cleaned.split()) >= 2:
+            cleaned_sentences.append(cleaned)
+    
+    return cleaned_sentences
 
 def prepare_data(config, tokenizer, cache_path):
 

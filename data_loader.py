@@ -336,8 +336,127 @@ class TokenBudgetBatchSampler(BatchSampler):
     def __len__(self) -> int:
         return len(self.batches)
 
-# Update the data_loader function to use PreloadedDataset
+# Update the data_loader function to use sentence-aware dataset when available
 def data_loader(config, tokenizer, cache_path):
+    block_size = config["block_size"]
+    batch_size = config["batch_size"]
+    
+    # Check if we should use sentence-aware processing
+    use_sentence_aware = config.get("use_sentence_aware", False)
+    
+    if use_sentence_aware:
+        print(f"{C.MAGENTA}🎯 Using Sentence-Aware Dataset for improved syntax learning{C.RESET}")
+        return _create_sentence_aware_loader(config, tokenizer, cache_path)
+    else:
+        print(f"{C.BLUE}Using traditional document-level chunked dataset{C.RESET}")
+        return _create_chunked_loader(config, tokenizer, cache_path)
+
+def _create_sentence_aware_loader(config, tokenizer, cache_path):
+    """Create data loaders using the sentence-aware dataset."""
+    from mlm_dataset import SentenceAwareDataset
+    
+    # Create the sentence-aware dataset
+    print(f"{C.CYAN}Loading sentence-aware dataset from {cache_path}...{C.RESET}")
+    
+    try:
+        # Use the new sentence-aware dataset
+        full_dataset = SentenceAwareDataset(
+            cache_path=cache_path,
+            tokenizer=tokenizer,
+            seq_length=config.get("seq_length", 512),
+            mask_p=config.get("mask_p", 0.15),
+            random_p=config.get("random_p", 0.1),
+            keep_p=config.get("keep_p", 0.1)
+        )
+        
+        print(f"{C.GREEN}Loaded {len(full_dataset)} sentences for sentence-aware training{C.RESET}")
+        
+        # Split the dataset
+        total_size = len(full_dataset)
+        train_size = int(0.85 * total_size)
+        val_size = int(0.05 * total_size)
+        test_size = total_size - train_size - val_size
+        
+        # Create train/val/test splits
+        import torch.utils.data as data
+        train_dataset, val_dataset, test_dataset = data.random_split(
+            full_dataset, [train_size, val_size, test_size]
+        )
+        
+        print(f"{C.CYAN}Dataset splits → train: {len(train_dataset)}, val: {len(val_dataset)}, test: {len(test_dataset)}{C.RESET}")
+        
+        # Sentence-aware data collator (handles batching of variable-length sentences)
+        def sentence_aware_collate_fn(batch):
+            """Custom collate function for sentence-aware data with proper padding."""
+            
+            # Since sequences are now padded to seq_length, just stack them
+            input_ids_list = [item['input_ids'] for item in batch]
+            attention_mask_list = [item['attention_mask'] for item in batch]
+            labels_list = [item['labels'] for item in batch]
+            
+            # Stack tensors (all should be same length now)
+            return {
+                'input_ids': torch.stack(input_ids_list),
+                'attention_mask': torch.stack(attention_mask_list),
+                'labels': torch.stack(labels_list)
+            }
+        
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config["batch_size"],
+            shuffle=True,
+            num_workers=4,  # Restored moderate multiprocessing
+            pin_memory=True,  # Restored pin_memory - you have plenty of GPU memory
+            collate_fn=sentence_aware_collate_fn,
+            drop_last=True
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=config["batch_size"],
+            shuffle=False,
+            num_workers=2,  # Restored moderate multiprocessing  
+            pin_memory=True,  # Restored pin_memory
+            collate_fn=sentence_aware_collate_fn,
+            drop_last=True
+        )
+        
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=config["batch_size"],
+            shuffle=False,
+            num_workers=2,  # Restored moderate multiprocessing
+            pin_memory=True,  # Restored pin_memory
+            collate_fn=sentence_aware_collate_fn,
+            drop_last=True
+        )
+        
+        # Estimate total tokens
+        avg_sentence_length = sum(len(full_dataset.sentences[i]) for i in range(min(1000, len(full_dataset.sentences)))) / min(1000, len(full_dataset.sentences))
+        total_tokens_train = int(len(train_dataset) * avg_sentence_length)
+        
+        print(f"{C.GREEN}Sentence-aware data loaders created successfully{C.RESET}")
+        print(f"{C.CYAN}Average sentence length: {avg_sentence_length:.1f} tokens{C.RESET}")
+        print(f"{C.CYAN}Estimated total training tokens: {total_tokens_train:,}{C.RESET}")
+        
+        return train_loader, val_loader, test_loader, sentence_aware_collate_fn, total_tokens_train
+        
+    except Exception as e:
+        print(f"{C.RED}Error creating sentence-aware dataset: {e}{C.RESET}")
+        print(f"{C.YELLOW}Falling back to traditional chunked dataset...{C.RESET}")
+        return _create_chunked_loader(config, tokenizer, cache_path)
+
+def _create_chunked_loader(config, tokenizer, cache_path):
+    """Create data loaders using the traditional chunked dataset (original implementation)."""
+    block_size = config["block_size"]
+    batch_size = config["batch_size"]
+
+    # Load or create cached splits
+    train_paths, val_paths, test_paths = create_and_cache_splits(config)
+
+def _create_chunked_loader(config, tokenizer, cache_path):
+    """Create data loaders using the traditional chunked dataset (original implementation)."""
     block_size = config["block_size"]
     batch_size = config["batch_size"]
 
@@ -369,6 +488,9 @@ def data_loader(config, tokenizer, cache_path):
     if mask_token_id is None:
         raise ValueError("MASK token not found in tokenizer vocabulary")
     
+    # Import masking strategies (needed for both static and dynamic paths)
+    from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
+    
     # Check if dynamic masking is enabled
     use_dynamic_masking = config.get("use_dynamic_masking", False)
     
@@ -382,11 +504,11 @@ def data_loader(config, tokenizer, cache_path):
         # For dynamic masking, we don't need to pre-apply masking to datasets
         # The collator will handle masking on-the-fly
         
+        # Initialize for legacy compatibility
+        n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
+        
     else:
         print(f"{C.BLUE}Using static masking strategy{C.RESET}")
-        
-        # Import masking strategies from mlm_dataset
-        from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
         
         # Get masking strategy from config (default to "span")
         masking_strategy_name = config.get("masking_strategy", "span")
@@ -462,118 +584,6 @@ def data_loader(config, tokenizer, cache_path):
                 "labels": labels_batch,
             }
 
-    # Legacy span masking function (kept for backward compatibility)
-    span_masking_strategy = SpanMaskingStrategy(
-        mask_p=0.15,  # 15% masking probability
-        tokenizer=tokenizer,
-        n_special_tokens=n_special_tokens,
-        padding_label_id=-100,
-        random_p=0.1,  # 10% random token replacement
-        keep_p=0.1     # 10% keep original token
-    )
-    
-    def collate_fn_with_span_mask(examples):
-        # examples is a list of token ID lists
-        # Convert to tensors properly - check if already tensor or list
-        input_ids = []
-        for ex in examples:
-            if isinstance(ex, torch.Tensor):
-                input_ids.append(ex.detach().clone())
-            else:
-                input_ids.append(torch.tensor(ex, dtype=torch.long))
-        
-        # Pad sequences to the same length
-        max_len = max(len(seq) for seq in input_ids)
-        padded_input_ids = []
-        attention_masks = []
-        all_labels = []
-        
-        for seq in input_ids:
-            # Pad sequence
-            padding_length = max_len - len(seq)
-            padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
-            
-            # Apply span masking to the padded sequence
-            masked_tokens, labels = span_masking_strategy(padded_seq)
-            
-            padded_input_ids.append(masked_tokens)
-            all_labels.append(labels)
-            
-            # Create attention mask (1 for real tokens, 0 for padding)
-            attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-                                      torch.zeros(padding_length, dtype=torch.long)])
-            attention_masks.append(attention_mask)
-        
-        # Stack into batch tensors
-        input_ids_batch = torch.stack(padded_input_ids)
-        attention_mask_batch = torch.stack(attention_masks)
-        labels_batch = torch.stack(all_labels)
-        
-        return {
-            "input_ids": input_ids_batch,
-            "attention_mask": attention_mask_batch,
-            "labels": labels_batch,
-        }
-
-    # Keep the original collate function as fallback
-    def collate_fn_with_mask(examples):
-        # examples is a list of token ID lists
-        # Convert to tensors properly - check if already tensor or list
-        input_ids = []
-        for ex in examples:
-            if isinstance(ex, torch.Tensor):
-                input_ids.append(ex.detach().clone())
-            else:
-                input_ids.append(torch.tensor(ex, dtype=torch.long))
-        
-        # Pad sequences to the same length
-        max_len = max(len(seq) for seq in input_ids)
-        padded_input_ids = []
-        attention_masks = []
-        
-        for seq in input_ids:
-            # Pad sequence
-            padding_length = max_len - len(seq)
-            padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
-            padded_input_ids.append(padded_seq)
-            
-            # Create attention mask (1 for real tokens, 0 for padding)
-            attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-                                      torch.zeros(padding_length, dtype=torch.long)])
-            attention_masks.append(attention_mask)
-        
-        # Stack into batch tensors
-        input_ids_batch = torch.stack(padded_input_ids)
-        attention_mask_batch = torch.stack(attention_masks)
-        
-        # Apply MLM masking (15% probability)
-        labels = input_ids_batch.clone()
-        
-        # Create random mask for 15% of tokens (excluding special tokens)
-        probability_matrix = torch.full(labels.shape, 0.15)
-        special_tokens_mask = (labels == pad_id) | (labels == tokenizer.token_to_id("[CLS]")) | (labels == tokenizer.token_to_id("[SEP]"))
-        probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-        
-        masked_indices = torch.bernoulli(probability_matrix).bool()
-        labels[~masked_indices] = -100  # We only compute loss on masked tokens
-        
-        # 80% of the time, replace masked input tokens with tokenizer.mask_token ([MASK])
-        indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
-        input_ids_batch[indices_replaced] = mask_token_id
-        
-        # 10% of the time, replace masked input tokens with random word
-        indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(tokenizer.get_vocab_size(), labels.shape, dtype=torch.long)
-        input_ids_batch[indices_random] = random_words[indices_random]
-        
-        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-        
-        return {
-            "input_ids": input_ids_batch,
-            "attention_mask": attention_mask_batch,
-            "labels": labels,
-        }
-
     # build dynamic, token‐based training batches
     max_tokens = config.get("max_tokens", config["block_size"] * config["batch_size"])
     print(f"{C.BLUE}Creating DataLoader with dynamic token batching (max_tokens={max_tokens})...{C.RESET}")
@@ -585,8 +595,6 @@ def data_loader(config, tokenizer, cache_path):
         shuffle=True
     )
 
-    
-    
     train_loader = DataLoader(
         train_ds,
         # batch_sampler=train_batch_sampler,
@@ -611,7 +619,6 @@ def data_loader(config, tokenizer, cache_path):
     print(f"{C.CYAN}Data preparation complete. Train files: {len(train_paths)}, Val files: {len(val_paths)}, Test files: {len(test_paths)}{C.RESET}")
 
     return train_loader, val_loader, test_loader, collate_fn, total_tokens_train
-    # return val_loader, val_loader, test_loader, collate_fn, total_tokens_val
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Iter Data Loader Script")

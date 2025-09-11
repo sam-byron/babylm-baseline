@@ -3,12 +3,13 @@ python3 convert_bnc.py
 
 python3 create_vocab.py
 
-python3 prepare_data.py --config_path model_babylm_ltg_bert.json
+python3 run_sentence_aware_pipeline.py
+
 python3 prepare_data.py --config_path model_babylm_ltg_bert.json --sanitize
 
 python3 data_loader.py --config_path model_babylm_ltg_bert.json
 
-python3 transformer_trainer.py --config_path model_babylm_ltg_bert.json
+accelerate launch transformer_trainer.py --config_path model_babylm_ltg_bert.json
 
 **to register model run**
 python3 ltg_bert.py

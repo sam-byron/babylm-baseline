@@ -104,58 +104,100 @@ from concurrent.futures import ThreadPoolExecutor
 # global thread pool for parallel disk writes
 _SAVE_POOL = ThreadPoolExecutor(max_workers=64)
 
-def process_and_save_chunk(arg, tokenizer_unused=None):
+def load_chunk_async(chunk_path):
     """
-    Tokenize and save a single chunk.
-    Note: tokenizer_unused parameter is kept for compatibility but tokenizer comes from arg
+    Load a single chunk asynchronously using the ELECTRA pattern.
+    This function is optimized for loading existing tokenized chunks.
     """
-    sample_chunk, chunk_index, cache_path, tokenizer = arg
-    
-    # Extract text from the samples
-    sample_chunk = [sample["text"] for sample in sample_chunk]
-    if not isinstance(sample_chunk, list) or not all(isinstance(t, str) for t in sample_chunk):
-        print(f"Expected list[str], got {type(sample_chunk)}")
-        raise ValueError(f"Expected list[str], got {type(sample_chunk)}")
-    
     try:
-        # Use encode_batch which returns list of Encoding objects
-        tokenized_batch = tokenizer.encode_batch(sample_chunk)
+        import torch
+        import os
+        import gc
         
-        # Extract the actual token IDs from each Encoding object
-        tokenized_chunk = []
-        for encoding in tokenized_batch:
-            if hasattr(encoding, 'ids'):
-                tokenized_chunk.append(encoding.ids)
-            else:
-                # Fallback if encoding is already a list of IDs
-                tokenized_chunk.append(encoding)
+        # Get file info for progress tracking
+        filename = os.path.basename(chunk_path)
+        file_size = os.path.getsize(chunk_path)
         
-        if not tokenized_chunk:
-            raise ValueError("Tokenizer did not produce any output. Check the input or tokenizer implementation.")
-            
-        # Debug: Print some stats about the tokenized chunk
-        total_tokens = sum(len(seq) for seq in tokenized_chunk)
-        unique_tokens = set()
-        for seq in tokenized_chunk:
-            unique_tokens.update(seq)
+        print(f"Loading {filename} ({file_size/(1024*1024):.1f}MB)...", flush=True)
         
-        print(f"Chunk {chunk_index}: {len(tokenized_chunk)} sequences, {total_tokens} total tokens, {len(unique_tokens)} unique tokens", flush=True)
+        # Load chunk data with memory optimization
+        chunk_data = torch.load(chunk_path, map_location='cpu', weights_only=False)
+        sentences = []
+        
+        # Process sentences efficiently
+        if isinstance(chunk_data, list):
+            for sentence_tokens in chunk_data:
+                if isinstance(sentence_tokens, (list, torch.Tensor)) and len(sentence_tokens) > 0:
+                    # Convert to tensor if needed
+                    if not isinstance(sentence_tokens, torch.Tensor):
+                        sentence_tokens = torch.tensor(sentence_tokens, dtype=torch.long)
+                    elif sentence_tokens.dtype != torch.long:
+                        sentence_tokens = sentence_tokens.long()
+                    
+                    # Basic validation
+                    if len(sentence_tokens) > 0:
+                        sentences.append(sentence_tokens)
+        
+        # Progress indicator
+        print(f"✓ {filename}: {len(sentences)} sentences loaded", flush=True)
+        
+        # Clean up intermediate data
+        del chunk_data
+        gc.collect()
+        
+        return sentences
         
     except Exception as e:
-        print(f"Error tokenizing chunk {chunk_index}: {e}", flush=True)
-        return None
-    
-    chunk_file_path = os.path.join(cache_path, f"chunk{chunk_index}.pt")
-    
-    # Save synchronously to ensure the file is written before the function returns
-    torch.save(tokenized_chunk, chunk_file_path)
-    print(f"Saved chunk {chunk_index} → {chunk_file_path}", flush=True)
-    
-    print(f"Tokenization complete for chunk {chunk_index} with {len(tokenized_chunk)} sequences", flush=True)
-    
-    # Clean up memory
-    del tokenized_chunk, tokenized_batch
-    gc.collect()
+        print(f"❌ Error loading {chunk_path}: {e}", flush=True)
+        # Force cleanup on error
+        import gc
+        gc.collect()
+        return []  # Return empty list for easier handling
 
-    return chunk_index
+
+def process_and_save_chunk(arg, tokenizer_unused=None):
+    """
+    Load and save a single chunk - ELECTRA pattern for sentence-aware loading.
+    This function matches the working ELECTRA implementation exactly.
+    """
+    # Unpack arguments - but this is for loading existing chunks, not tokenizing new ones
+    chunk_path, chunk_index, cache_path = arg
+    
+    try:
+        # Load the chunk using the existing load_chunk_safe function
+        print(f"Loading chunk {chunk_index} from {chunk_path}...", flush=True)
+        tokenized_chunk = load_chunk_safe(chunk_path)
+        
+        if not tokenized_chunk:
+            print(f"Warning: Empty chunk loaded from {chunk_path}")
+            return None
+        
+        # For sentence-aware loading, we expect the chunk to already be tokenized properly
+        # Just validate the structure
+        if isinstance(tokenized_chunk, list) and len(tokenized_chunk) > 0:
+            # Count sentences and tokens for progress tracking
+            total_sentences = len(tokenized_chunk)
+            total_tokens = sum(len(seq) if hasattr(seq, '__len__') else 0 for seq in tokenized_chunk)
+            avg_length = total_tokens / total_sentences if total_sentences > 0 else 0
+            
+            print(f"Chunk {chunk_index}: {total_sentences} sentences, "
+                  f"avg length: {avg_length:.1f} tokens", flush=True)
+        
+        # Use async saving with ThreadPoolExecutor like ELECTRA pattern
+        chunk_file_path = os.path.join(cache_path, f"chunk{chunk_index}.pt")
+        fut = _SAVE_POOL.submit(torch.save, tokenized_chunk, chunk_file_path)
+        fut.add_done_callback(lambda f: print(f"Saved chunk {chunk_index} → {chunk_file_path}", flush=True))
+        
+        print(f"Processing complete for chunk {chunk_index} with {len(tokenized_chunk)} sentences", flush=True)
+        
+        # Clean up memory - this is critical for memory management
+        result_size = len(tokenized_chunk)
+        del tokenized_chunk
+        gc.collect()  # Force garbage collection to free memory
+        
+        return fut  # Return future like ELECTRA pattern
+        
+    except Exception as e:
+        print(f"Error processing chunk {chunk_index} from {chunk_path}: {e}", flush=True)
+        return None
 

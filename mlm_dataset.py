@@ -5,6 +5,52 @@ import pickle
 import gzip
 
 
+def _load_chunk_sentences(chunk_path):
+    """Helper function for multiprocessing chunk loading - robust version with memory management."""
+    try:
+        import torch
+        import os
+        import gc
+        
+        # Get file info
+        filename = os.path.basename(chunk_path)
+        file_size = os.path.getsize(chunk_path)
+        
+        # Load chunk data with memory optimization
+        chunk_data = torch.load(chunk_path, map_location='cpu', weights_only=False)
+        sentences = []
+        
+        # Process sentences efficiently
+        if isinstance(chunk_data, list):
+            for sentence_tokens in chunk_data:
+                if isinstance(sentence_tokens, (list, torch.Tensor)) and len(sentence_tokens) > 0:
+                    # Convert to tensor if needed
+                    if not isinstance(sentence_tokens, torch.Tensor):
+                        sentence_tokens = torch.tensor(sentence_tokens, dtype=torch.long)
+                    elif sentence_tokens.dtype != torch.long:
+                        sentence_tokens = sentence_tokens.long()
+                    
+                    # Basic validation
+                    if len(sentence_tokens) > 0:
+                        sentences.append(sentence_tokens)
+        
+        # Aggressive cleanup to prevent memory leaks
+        del chunk_data
+        gc.collect()
+        
+        # Progress indicator
+        print(f"✓ {filename}: {len(sentences)} sentences ({file_size/(1024*1024):.1f}MB)")
+        
+        return sentences
+        
+    except Exception as e:
+        print(f"❌ Error loading {chunk_path}: {e}")
+        # Force cleanup on error
+        import gc
+        gc.collect()
+        return []  # Return empty list instead of None for easier handling
+
+
 class Indexer:
     def __init__(self, documents):
         lengths = [len(document) for document in documents]
@@ -329,6 +375,240 @@ class OrderDataset(AbstractMlmDataset):
         ])
         is_next_sentence = torch.tensor(is_next_sentence, dtype=torch.long)
         return segment, attention_mask, is_next_sentence
+
+
+class SentenceAwareDataset(Dataset):
+    """Dataset that loads tokenized sentences with preserved boundaries from PT files."""
+    
+    def __init__(self, cache_path, tokenizer, seq_length=512, mask_p=0.15, random_p=0.1, keep_p=0.1):
+        self.tokenizer = tokenizer
+        self.seq_length = seq_length
+        self.mask_p = mask_p
+        self.random_p = random_p
+        self.keep_p = keep_p
+        self.n_special_tokens = 6
+        self.padding_label_id = -100
+        
+        # Initialize token IDs
+        self.cls_token_id = self.tokenizer.token_to_id("[CLS]")
+        self.sep_token_id = self.tokenizer.token_to_id("[SEP]")
+        self.pad_token_id = self.tokenizer.token_to_id("[PAD]")
+        self.mask_token_id = self.tokenizer.token_to_id("[MASK]")
+        
+        # Load all chunk files with robust multiprocessing
+        import glob
+        import os
+        from multiprocessing import Pool, cpu_count
+        import multiprocessing as mp
+        from functools import partial
+        
+        chunk_paths = sorted(glob.glob(os.path.join(cache_path, "chunk*.pt")))
+        print(f"Loading {len(chunk_paths)} chunk files for sentence-aware MLM training...")
+        
+        if len(chunk_paths) == 0:
+            raise ValueError(f"No chunk files found in {cache_path}")
+        
+        self.sentences = []
+        
+        # Use simple sequential loading for reliability
+        print(f"💾 Memory before loading: {self._get_memory_usage()}")
+        
+        for i, path in enumerate(chunk_paths):
+            try:
+                result = _load_chunk_sentences(path)
+                if result:
+                    self.sentences.extend(result)
+                if (i + 1) % 10 == 0:
+                    print(f"Sequential: {i + 1}/{len(chunk_paths)} chunks loaded, {len(self.sentences)} sentences so far")
+                    print(f"💾 Memory usage: {self._get_memory_usage()}")
+            except Exception as e:
+                print(f"Error loading {path}: {e}")
+        
+        print(f"✅ Loaded {len(self.sentences)} sentences from {len(chunk_paths)} chunks")
+        
+        # Create multi-sentence sequences first
+        try:
+            self.sequences = self._create_multi_sentence_sequences()
+            print(f"✅ Successfully created {len(self.sequences)} sequences")
+        except Exception as e:
+            print(f"❌ Error creating sequences: {e}")
+            # Fallback: create simple sequences from individual sentences
+            print("Creating fallback individual sentence sequences...")
+            self.sequences = self.sentences[:10000]  # Use first 10k sentences as sequences
+            print(f"✅ Created {len(self.sequences)} fallback sequences")
+        
+        # EMERGENCY: Clean up sentences list to save memory AFTER sequence creation
+        print("🧹 Cleaning up intermediate sentences data to save memory...")
+        temp_sequences_count = len(self.sequences)
+        del self.sentences  # Free memory from sentences list
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+        print(f"✅ Memory cleanup complete. Dataset ready with {temp_sequences_count} sequences")
+        
+    def _get_memory_usage(self):
+        """Get current memory usage in a readable format."""
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            return f"{memory_mb:.1f}MB"
+        except:
+            return "unknown"
+    
+    def _create_multi_sentence_sequences(self):
+        """Combine multiple sentences into sequences up to seq_length tokens."""
+        print("Creating multi-sentence sequences for long-range learning...")
+        sequences = []
+        current_sequence = []
+        current_length = 0
+        
+        # Pre-allocate pad tensor for efficiency
+        pad_tensor_cache = {}
+        
+        for i, sentence in enumerate(self.sentences):
+            sentence_length = len(sentence)
+            
+            # Truncate long sentences instead of skipping them - preserve all data!
+            if sentence_length > self.seq_length:
+                if i % 10000 == 0:  # Only log every 10,000th truncation to reduce spam
+                    print(f"Truncating sentence {i} from length {sentence_length} to {self.seq_length}")
+                sentence = sentence[:self.seq_length]  # Truncate to max length
+                sentence_length = self.seq_length
+            
+            # If adding this sentence would exceed seq_length, save current and start new
+            if current_length + sentence_length > self.seq_length and current_sequence:
+                # Combine current sequence
+                combined = torch.cat(current_sequence)
+                padding_needed = self.seq_length - len(combined)
+                
+                if padding_needed > 0:
+                    # Use cached padding tensor for efficiency
+                    if padding_needed not in pad_tensor_cache:
+                        pad_tensor_cache[padding_needed] = torch.full((padding_needed,), self.pad_token_id, dtype=torch.long)
+                    combined = torch.cat([combined, pad_tensor_cache[padding_needed]])
+                
+                sequences.append(combined)
+                current_sequence = []
+                current_length = 0
+                
+                # Progress update
+                if len(sequences) % 10000 == 0:
+                    print(f"Created {len(sequences)} sequences so far...")
+            
+            # Add sentence to current sequence
+            current_sequence.append(sentence)
+            current_length += sentence_length
+        
+        # Add final sequence if it exists
+        if current_sequence:
+            combined = torch.cat(current_sequence)
+            padding_needed = self.seq_length - len(combined)
+            if padding_needed > 0:
+                if padding_needed not in pad_tensor_cache:
+                    pad_tensor_cache[padding_needed] = torch.full((padding_needed,), self.pad_token_id, dtype=torch.long)
+                combined = torch.cat([combined, pad_tensor_cache[padding_needed]])
+            sequences.append(combined)
+        
+        print(f"✅ Created {len(sequences)} multi-sentence sequences")
+        return sequences
+    
+    def __len__(self):
+        return len(self.sequences)
+    
+    def __getitem__(self, idx):
+        """Get a multi-sentence training example with MLM masking."""
+        sequence = self.sequences[idx].clone()
+        
+        # Create attention mask (1 for real tokens, 0 for padding)
+        attention_mask = (sequence != self.pad_token_id).bool()
+        
+        # Apply MLM masking while respecting sentence boundaries
+        masked_sequence, labels = self._apply_sentence_aware_masking(sequence)
+        
+        return {
+            'input_ids': masked_sequence,
+            'attention_mask': attention_mask,
+            'labels': labels
+        }
+    
+    def _apply_sentence_aware_masking(self, tokens):
+        """Apply MLM masking while respecting sentence boundaries."""
+        labels = torch.full_like(tokens, self.padding_label_id)
+        
+        # Find positions that can be masked (avoid special tokens and boundaries)
+        maskable_positions = []
+        for i, token_id in enumerate(tokens):
+            # Skip special tokens
+            if token_id in [self.cls_token_id, self.sep_token_id, self.pad_token_id]:
+                continue
+            # Skip if this is a special token
+            if token_id < self.n_special_tokens:
+                continue
+            # Don't mask tokens immediately adjacent to sentence boundaries
+            if i > 0 and tokens[i-1] in [self.cls_token_id, self.sep_token_id]:
+                continue
+            if i < len(tokens) - 1 and tokens[i+1] in [self.cls_token_id, self.sep_token_id]:
+                continue
+                
+            maskable_positions.append(i)
+        
+        if len(maskable_positions) == 0:
+            return tokens, labels
+        
+        # Determine how many tokens to mask
+        num_to_mask = max(1, int(len(maskable_positions) * self.mask_p))
+        
+        # Randomly select positions to mask
+        import random
+        masked_positions = random.sample(maskable_positions, min(num_to_mask, len(maskable_positions)))
+        
+        # Apply masking strategy (80% [MASK], 10% random, 10% unchanged)
+        for pos in masked_positions:
+            labels[pos] = tokens[pos].clone()  # Store original token for loss
+            
+            rand = random.random()
+            if rand < 0.8:
+                # 80% of the time, replace with [MASK]
+                tokens[pos] = self.mask_token_id
+            elif rand < 0.9:
+                # 10% of the time, replace with random token
+                tokens[pos] = random.randint(self.n_special_tokens, self.tokenizer.get_vocab_size() - 1)
+            # 10% of the time, keep unchanged
+        
+        return tokens, labels
+
+
+if __name__ == "__main__":
+    from tokenizers import Tokenizer
+
+    # Test the original dataset
+    tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
+    dataset = MlmDataset("data/pretrain/tokenized/train_0.pickle.gz", tokenizer, "whole_word")
+    
+    inputs, attention_mask, outputs = dataset[21000]
+
+    for i, output in enumerate(outputs.tolist()):
+        if output != -100:
+            print(i, output, tokenizer.id_to_token(output))
+    
+    # Test the new sentence-aware dataset
+    print("\n" + "="*50)
+    print("Testing SentenceAwareDataset...")
+    
+    try:
+        sentence_dataset = SentenceAwareDataset("./", tokenizer)
+        if len(sentence_dataset) > 0:
+            sample = sentence_dataset[0]
+            print(f"Sample: {sample['input_ids'].shape}, {sample['attention_mask'].shape}, {sample['labels'].shape}")
+            
+            # Check for boundary tokens
+            cls_positions = (sample['input_ids'] == tokenizer.token_to_id("[CLS]")).nonzero()
+            sep_positions = (sample['input_ids'] == tokenizer.token_to_id("[SEP]")).nonzero()
+            print(f"Boundary tokens: {len(cls_positions)} [CLS], {len(sep_positions)} [SEP]")
+    except Exception as e:
+        print(f"Could not test SentenceAwareDataset: {e}")
 
 
 class BasicDataset(AbstractMlmDataset):
