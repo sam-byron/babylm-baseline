@@ -284,9 +284,9 @@ def train_loop(
                         accelerator.print(f"{C.CYAN}Unique tokens in input_ids: {len(all_input_tokens)}/{tokenizer.get_vocab_size()}{C.RESET}")
                         
                         # Sample some input tokens to see what we're working with
-                        sample_input_ids = batch["input_ids"].view(-1)[:50]  # First 50 tokens from batch
+                        sample_input_ids = batch["input_ids"].view(-1)[:100]  # First 50 tokens from batch
                         sample_input_tokens = [tokenizer.id_to_token(int(token_id)) for token_id in sample_input_ids if int(token_id) < tokenizer.get_vocab_size()]
-                        accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens[:15]}{C.RESET}")
+                        accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens[:100]}{C.RESET}")
                     loss = outputs.loss
                     # Ensure all ranks participate in backward/all-reduce: replace non-finite with 0
                     if not torch.isfinite(loss):

@@ -6,8 +6,9 @@ import os
 import json
 import argparse
 import gc
+import random
 # from sre_parse import Tokenizer
-from datasets import load_dataset, Dataset, concatenate_datasets, load_from_disk
+# from datasets import load_dataset, Dataset, concatenate_datasets, load_from_disk
 from functools import partial
 from utils_mp import tokenize_sample, load_chunk, process_and_save_chunk
 # from utils import tokenize_sample, process_and_save_chunk
@@ -17,7 +18,8 @@ import torch
 import multiprocessing as mp
 from itertools import islice
 from transformers import AutoTokenizer
-from torch.utils.data import DataLoader
+# from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from transformers import BertTokenizer, BertModel
 from transformers import (
     ElectraConfig,
@@ -53,7 +55,59 @@ def chunked(iterable, size):
             # If StopIteration is raised, it means the iterator is exhausted
             break
 
-def load_md_files_to_dataset(data_dir):
+class BertDataset(Dataset):
+    def __init__(self, data_dir, tokenizer):
+        self.tokenizer = tokenizer
+
+        self.n_special_tokens = 6
+
+        self.mask_index = self.tokenizer.token_to_id("[MASK]")
+        self.cls_index = self.tokenizer.token_to_id("[CLS]")
+        self.sep_index = self.tokenizer.token_to_id("[SEP]")
+        self.pad_index = self.tokenizer.token_to_id("[PAD]")
+
+        """Load all .md files as complete file contents, not line by line"""
+        pattern = os.path.join(data_dir, "**/*.md")
+        md_files = glob.glob(pattern, recursive=True)
+        print(f"Found {len(md_files)} .md files")
+
+        self.segments = []
+        for file_path in md_files:
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for i, segment in enumerate(f):
+                        segment = segment.strip()
+                        if segment:  # Only add non-empty content
+                            self.segments.append(segment)
+            except Exception as e:
+                print(f"Warning: Could not read {file_path}: {e}")
+
+    def __len__(self):
+        return len(self.segments)
+    
+    def shuffle(self):
+        """Shuffle the dataset segments in place."""
+        random.shuffle(self.segments)
+
+    def __getitem__(self, index):
+        # Handle both single index and list of indices
+        if isinstance(index, list):
+            # Return list of items for batch processing
+            return [self._get_single_item(i) for i in index]
+        else:
+            # Return single item
+            return self._get_single_item(index)
+    
+    def _get_single_item(self, index):
+        """Get a single item by index"""
+        segment = self.segments[index]
+        # append [CLS] and [SEP] string to segment
+        formatted_segment = f"[CLS] {segment} [SEP]"
+        
+        # return formatted_segment
+        return {"text": formatted_segment}
+    
+def load_md_files_to_dataset(data_dir, tokenizer):
     """Load all .md files as complete file contents, not line by line"""
     pattern = os.path.join(data_dir, "**/*.md")
     md_files = glob.glob(pattern, recursive=True)
@@ -86,17 +140,21 @@ def prepare_data(config, tokenizer, cache_path):
 
     # Load complete file contents, not line by line
     data_dir = "./data/pretrain/bnc"
-    ds = load_md_files_to_dataset(data_dir)
+    # ds = load_md_files_to_dataset(data_dir, tokenizer)
+    ds = BertDataset(data_dir, tokenizer)
 
-    # Print 5 random samples to verify loading
-    for i, sample in enumerate(ds.shuffle().select(range(5))):
-        print(f"Sample {i}: {sample['text']}...")
-
+    ds.shuffle()  # Shuffle in place
+    print("First 5 samples:")
+    for i in range(min(5, len(ds))):
+        sample = ds[i]
+        # print(f"Sample {i}: {sample['text']}...")
+        print(f"Sample {i}: {sample}")
     # Print number of samples in the dataset
     print(f"Number of samples in dataset: {len(ds)}")
 
     # Print number of words in the dataset
-    total_words = sum(len(sample["text"].split()) for sample in ds)
+    total_words = sum(len(ds[i]["text"].split()) for i in range(len(ds)))
+    # total_words = sum(len(ds[i].split()) for i in range(len(ds)))
     print(f"Total words in dataset: {total_words}")
     # return
 
@@ -120,7 +178,7 @@ def prepare_data(config, tokenizer, cache_path):
     for chunk_idx, chunk in enumerate(dataloader):
         print(f"Appending chunk {chunk_idx}, with {len(chunk)} examples")
         chunk_arg = (chunk, chunk_idx, cache_path, tokenizer)
-        # pool.apply(process_and_save_chunk, args=(chunk_arg, tokenizer))
+        # pool.apply(process_and_save_chunk, args=(chunk_arg,))
         pool.apply_async(process_and_save_chunk,
                              args=(chunk_arg,))  # Remove the extra tokenizer argument
         if len(chunk) == 0:
@@ -213,7 +271,8 @@ def main():
         config = json.load(config_file)
     tokenizer = Tokenizer.from_file(config.get("tokenizer_path"))
     tokenizer.model_max_length = config.get("max_position_embeddings", 512)
-    tokenizer.enable_padding(length=tokenizer.model_max_length)
+    # Don't enable padding here - let the data loader handle dynamic padding
+    # tokenizer.enable_padding(length=tokenizer.model_max_length)
     # tokenizer.enable_truncation(max_length=tokenizer.model_max_length)
     # tokenizer.model_max_length = config.get("max_position_embeddings", 512)
     if args.sanitize:
