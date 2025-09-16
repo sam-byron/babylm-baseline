@@ -283,10 +283,26 @@ def train_loop(
                         all_input_tokens = torch.unique(batch["input_ids"])
                         accelerator.print(f"{C.CYAN}Unique tokens in input_ids: {len(all_input_tokens)}/{tokenizer.get_vocab_size()}{C.RESET}")
                         
+                        # Print shape of batch
+                        accelerator.print(f"{C.CYAN}Batch input_ids shape: {batch['input_ids'].shape}{C.RESET}")
                         # Sample some input tokens to see what we're working with
-                        sample_input_ids = batch["input_ids"].view(-1)[:100]  # First 50 tokens from batch
-                        sample_input_tokens = [tokenizer.id_to_token(int(token_id)) for token_id in sample_input_ids if int(token_id) < tokenizer.get_vocab_size()]
-                        accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens[:100]}{C.RESET}")
+                        sample_input_ids = batch["input_ids"][0] # First 50 tokens from batch
+                        # Print proportion of masked tokens in sample_input_ids
+                        num_masked_in_sample = (sample_input_ids == tokenizer.token_to_id("[MASK]")).sum().item()
+                        accelerator.print(f"{C.GREEN}Sample input has {num_masked_in_sample}/{len(sample_input_ids)} masked tokens ({num_masked_in_sample/len(sample_input_ids):.1%}){C.RESET}")
+                        # Print number of unknown tokens in sample_input_ids
+                        num_unk_in_sample = (sample_input_ids == tokenizer.token_to_id("[UNK]")).sum().item()
+                        # Print labels for sample_input_ids
+                        sample_labels = batch["labels"][0]  # Labels for the first sequence in the batch
+                        accelerator.print(f"{C.CYAN}Sample labels: {sample_labels}{C.RESET}")
+                        accelerator.print(f"{C.GREEN}Sample input has {num_unk_in_sample}/{len(sample_input_ids)} unknown tokens ({num_unk_in_sample/len(sample_input_ids):.1%}){C.RESET}")
+                        # sample_input_tokens = [tokenizer.id_to_token(int(token_id)) for token_id in sample_input_ids if int(token_id) < tokenizer.get_vocab_size()]
+                        sample_input_tokens = [
+                            tokenizer.id_to_token(int(token_id)) if int(token_id) < tokenizer.get_vocab_size()
+                            else "[UNK]"
+                            for token_id in sample_input_ids
+                        ]
+                        accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens}{C.RESET}")
                     loss = outputs.loss
                     # Ensure all ranks participate in backward/all-reduce: replace non-finite with 0
                     if not torch.isfinite(loss):

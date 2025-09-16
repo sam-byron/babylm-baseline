@@ -102,10 +102,10 @@ class BertDataset(Dataset):
         """Get a single item by index"""
         segment = self.segments[index]
         # append [CLS] and [SEP] string to segment
-        formatted_segment = f"[CLS] {segment} [SEP]"
+        # formatted_segment = f"[CLS] {segment} [SEP]"
         
         # return formatted_segment
-        return {"text": formatted_segment}
+        return {"text": segment}
     
 def load_md_files_to_dataset(data_dir, tokenizer):
     """Load all .md files as complete file contents, not line by line"""

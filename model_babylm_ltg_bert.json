@@ -30,7 +30,7 @@
     "mask_p": 0.15,
     "random_p": 0.1,
     "keep_p": 0.1,
-    "use_dynamic_masking": false,
+    "use_dynamic_masking": true,
     "optimizer": "adamw",
     "share_layer_weights": false,
     "monitoring": {

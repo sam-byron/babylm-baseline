@@ -55,54 +55,16 @@ def compute_total_tokens(ds: Union[Dataset, object]) -> int:
     # fallback for map‐style datasets returning dicts
     return sum(len(ex) for ex in ds)
 
-# helper to build index entries for one chunk file in parallel (concatenation mode)
-def _index_for_path(args):
-    path, block_size = args
-    seqs = torch.load(path, map_location="cpu")
-    
-    # Chain sequences together until we reach target block_size
-    entries = []
-    all_tokens = []
-    current_block = []
-    current_pos = 0
-    
-    for seq in seqs:
-        seq_tokens = seq.tolist() if isinstance(seq, torch.Tensor) else seq
-        
-        # Add sequence to current block
-        current_block.extend(seq_tokens)
-        
-        # While current block has enough tokens for a full block, create training blocks
-        while len(current_block) >= block_size:
-            # Extract exactly block_size tokens for the training block
-            block_tokens = current_block[:block_size]
-            all_tokens.extend(block_tokens)
-            
-            # Create index entry
-            start = current_pos
-            end = current_pos + block_size
-            entries.append((path, 0, start, end))
-            current_pos += block_size
-            
-            # Keep remaining tokens for next block
-            current_block = current_block[block_size:]
-    
-    # Handle remaining tokens (if any) - add them if we have at least 2 tokens for MLM
-    if len(current_block) >= 2:
-        all_tokens.extend(current_block)
-        start = current_pos
-        end = current_pos + len(current_block)
-        entries.append((path, 0, start, end))
-    
-    return entries, all_tokens
-
 class ChunkedDataset(Dataset):
     # FIX 1: Change the default dtype to torch.long for compatibility with embedding layers.
-    def __init__(self, chunk_paths, block_size, dtype=torch.long, pad_token_id=None, cache_size=50):
+    def __init__(self, chunk_paths, block_size, tokenizer, dtype=torch.long, pad_token_id=None, cache_size=50):
         # shuffle once
         self.chunk_paths = list(chunk_paths)
         # random.shuffle(self.chunk_paths)
         self.block_size   = block_size
+        self.tokenizer    = tokenizer
+        self.cls_index = self.tokenizer.token_to_id("[CLS]")
+        self.sep_index = self.tokenizer.token_to_id("[SEP]")
         self.dtype        = dtype
         self.pad_token_id = pad_token_id or 0
         self.cache_size   = cache_size
@@ -132,6 +94,48 @@ class ChunkedDataset(Dataset):
         cache_input = (tuple(path_data), self.block_size)
         cache_str = str(cache_input).encode('utf-8')
         return hashlib.md5(cache_str).hexdigest()
+    
+    # helper to build index entries for one chunk file in parallel (concatenation mode)
+    def _index_for_path(self, args):
+        path, block_size = args
+        seqs = torch.load(path, map_location="cpu")
+        
+        # Chain sequences together until we reach target block_size
+        entries = []
+        all_tokens = []
+        current_block = []
+        current_pos = 0
+        
+        for seq in seqs:
+            seq_tokens = seq.tolist() if isinstance(seq, torch.Tensor) else seq
+            
+            # Add sequence to current block
+            current_block.extend(seq_tokens)
+            
+            # While current block has enough tokens for a full block, create training blocks
+            while len(current_block) >= block_size - 2:  # Reserve space for [CLS] and [SEP]
+                # Extract exactly block_size tokens for the training block
+                block_tokens = current_block[:block_size-2]
+                block_tokens = [self.cls_index] + block_tokens + [self.sep_index]  # Add [CLS] and [SEP]
+                all_tokens.extend(block_tokens)
+                
+                # Create index entry
+                start = current_pos
+                end = current_pos + block_size
+                entries.append((path, 0, start, end))
+                current_pos += block_size
+                
+                # Keep remaining tokens for next block
+                current_block = current_block[block_size:]
+        
+        # Handle remaining tokens (if any) - add them if we have at least 2 tokens for MLM
+        if len(current_block) >= 2:
+            all_tokens.extend(current_block)
+            start = current_pos
+            end = current_pos + len(current_block)
+            entries.append((path, 0, start, end))
+        
+        return entries, all_tokens
 
     def _build_index(self):
         """Create self.index_map = [ (path, seq_idx, start, end), ... ] with caching."""
@@ -165,7 +169,7 @@ class ChunkedDataset(Dataset):
         self._concatenated_data = {}  # Store concatenated sequences
         
         with mp.Pool(processes=max_workers) as pool:
-            for entries, concatenated_tokens in pool.imap_unordered(_index_for_path, args):
+            for entries, concatenated_tokens in pool.imap_unordered(self._index_for_path, args):
                 if entries:  # Only process if we got valid entries
                     path = entries[0][0]  # Get path from first entry
                     self._concatenated_data[path] = concatenated_tokens
@@ -393,9 +397,9 @@ def data_loader(config, tokenizer, cache_path):
     if pad_id is None:
         raise ValueError("PAD token not found in tokenizer vocabulary")
     print(f"{C.BLUE}Creating ChunkedDataset instances...{C.RESET}")
-    train_ds = ChunkedDataset(train_paths, block_size=block_size, pad_token_id=pad_id)
-    val_ds   = ChunkedDataset(val_paths,   block_size=block_size, pad_token_id=pad_id)
-    test_ds  = ChunkedDataset(test_paths,  block_size=block_size, pad_token_id=pad_id)
+    train_ds = ChunkedDataset(train_paths, block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
+    val_ds   = ChunkedDataset(val_paths,   block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
+    test_ds  = ChunkedDataset(test_paths,  block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
 
     # Compute total tokens for each split
     total_tokens_train = sum(train_ds.block_lengths)
