@@ -21,6 +21,7 @@ class DynamicMaskingCollator:
         masking_strategy: str = "span",
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: str = "pt",
+        max_span_length: int = 10,
     ):
         self.tokenizer = tokenizer
         self.mlm_probability = mlm_probability
@@ -29,6 +30,7 @@ class DynamicMaskingCollator:
         self.masking_strategy = masking_strategy
         self.pad_to_multiple_of = pad_to_multiple_of
         self.return_tensors = return_tensors
+        self.max_span_length = max_span_length
         
         # Get special token IDs
         self.pad_token_id = tokenizer.token_to_id("[PAD]")
@@ -49,14 +51,25 @@ class DynamicMaskingCollator:
             raise ValueError(f"Unknown masking strategy: {masking_strategy}. Choose from {list(masking_strategies.keys())}")
         
         masking_strategy_class = masking_strategies[masking_strategy]
-        self.masking_strategy_instance = masking_strategy_class(
-            mask_p=mlm_probability,
-            tokenizer=tokenizer,
-            n_special_tokens=n_special_tokens,
-            padding_label_id=-100,
-            random_p=random_probability,
-            keep_p=keep_probability
-        )
+        if masking_strategy == "span":
+            self.masking_strategy_instance = masking_strategy_class(
+                mask_p=mlm_probability,
+                tokenizer=tokenizer,
+                n_special_tokens=n_special_tokens,
+                padding_label_id=-100,
+                random_p=random_probability,
+                keep_p=keep_probability,
+                max_span_length=max_span_length,
+            )
+        else:   
+            self.masking_strategy_instance = masking_strategy_class(
+                mask_p=mlm_probability,
+                tokenizer=tokenizer,
+                n_special_tokens=n_special_tokens,
+                padding_label_id=-100,
+                random_p=random_probability,
+                keep_p=keep_probability,
+            )
         
         print(f"🎭 Dynamic collator using {masking_strategy} masking strategy (reusing mlm_dataset implementation)")
 
@@ -119,11 +132,23 @@ def create_dynamic_collator(config, tokenizer):
     mlm_probability = config.get("mask_p", 0.15)
     random_probability = config.get("random_p", 0.1)
     keep_probability = config.get("keep_p", 0.1)
-    
-    return DynamicMaskingCollator(
-        tokenizer=tokenizer,
-        mlm_probability=mlm_probability,
-        random_probability=random_probability,
-        keep_probability=keep_probability,
-        masking_strategy=masking_strategy,
-    )
+
+    if config.get("masking_strategy") == "span":
+        max_span_length = config.get("max_span_length", 10)
+        print(f"Using max_span_length={max_span_length} for span masking")
+        return DynamicMaskingCollator(
+            tokenizer=tokenizer,
+            mlm_probability=mlm_probability,
+            random_probability=random_probability,
+            keep_probability=keep_probability,
+            masking_strategy=masking_strategy,
+            max_span_length=max_span_length,
+        )
+    else:
+        return DynamicMaskingCollator(
+            tokenizer=tokenizer,
+            mlm_probability=mlm_probability,
+            random_probability=random_probability,
+            keep_probability=keep_probability,
+            masking_strategy=masking_strategy,
+        )

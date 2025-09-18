@@ -458,7 +458,7 @@ def data_loader(config, tokenizer, cache_path):
             n_special_tokens=n_special_tokens,
             padding_label_id=-100,
             random_p=random_p,
-            keep_p=keep_p
+            keep_p=keep_p,
         )
         
         print(f"{C.BLUE}Using {masking_strategy_name} masking strategy (mask_p={mask_p}, random_p={random_p}, keep_p={keep_p}){C.RESET}")
@@ -486,8 +486,11 @@ def data_loader(config, tokenizer, cache_path):
                 padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
                 
                 # Apply the chosen masking strategy to the padded sequence
-                masked_tokens, labels = masking_strategy(padded_seq)
-                
+                max_span_length = config.get("max_span_length", 10)
+                # Print max_span_length for debugging
+                print(f"Applying masking with max_span_length={max_span_length}")
+                masked_tokens, labels = masking_strategy(padded_seq, max_span_length=max_span_length)
+
                 padded_input_ids.append(masked_tokens)
                 all_labels.append(labels)
                 

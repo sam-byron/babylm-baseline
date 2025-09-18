@@ -3,3 +3,5 @@
 
 # Ignore all folders (alternative syntax)
 **/
+
+!tests/
