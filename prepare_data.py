@@ -10,10 +10,9 @@ import random
 # from sre_parse import Tokenizer
 # from datasets import load_dataset, Dataset, concatenate_datasets, load_from_disk
 from functools import partial
-from utils_mp import tokenize_sample, load_chunk, process_and_save_chunk
+from utils_mp import process_and_save_chunk
 # from utils import tokenize_sample, process_and_save_chunk
 from multiprocessing import Pool
-from itertools import chain
 import torch
 import multiprocessing as mp
 from itertools import islice
@@ -21,14 +20,7 @@ from transformers import AutoTokenizer
 # from torch.utils.data import DataLoader
 from torch.utils.data import DataLoader, Dataset
 from transformers import BertTokenizer, BertModel
-from transformers import (
-    ElectraConfig,
-    ElectraForPreTraining,
-    ElectraTokenizerFast,
-    DataCollatorForLanguageModeling,
-    Trainer,
-    TrainingArguments,
-)
+
 from transformers.tokenization_utils_base import BatchEncoding
 
 from tokenizer import Tokenizer
@@ -78,6 +70,8 @@ class BertDataset(Dataset):
                     for i, segment in enumerate(f):
                         segment = segment.strip()
                         if segment:  # Only add non-empty content
+                            # prepend [CLS] and append [SEP] to each segment
+                            segment = f"[CLS] {segment} [SEP]"
                             self.segments.append(segment)
             except Exception as e:
                 print(f"Warning: Could not read {file_path}: {e}")
@@ -271,10 +265,7 @@ def main():
         config = json.load(config_file)
     tokenizer = Tokenizer.from_file(config.get("tokenizer_path"))
     tokenizer.model_max_length = config.get("max_position_embeddings", 512)
-    # Don't enable padding here - let the data loader handle dynamic padding
-    # tokenizer.enable_padding(length=tokenizer.model_max_length)
-    # tokenizer.enable_truncation(max_length=tokenizer.model_max_length)
-    # tokenizer.model_max_length = config.get("max_position_embeddings", 512)
+  
     if args.sanitize:
         # Sanitize the chunks in the cache directory
         print(f"Sanitizing chunks...")
@@ -283,15 +274,11 @@ def main():
         # tokenizer.save_pretrained(config["cache_path"])  # Save tokenizer to cache path
         return
     
-    # tokenizer.save_pretrained(config["cache_path"])  # Save tokenizer to cache path
-    # tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    # tokenizer.pad_token = tokenizer.eos_token
     prepare_data(
         config, tokenizer, config["cache_path"]
     )
 
 if __name__ == "__main__":
-    # mp.set_start_method("spawn", force=True)
      # Force the start method to 'spawn' to avoid deadlocks with transformers tokenizers
     # This is crucial for robust multiprocessing with complex libraries.
     mp.set_start_method("spawn", force=True)

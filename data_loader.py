@@ -10,23 +10,17 @@ import glob
 from functools import partial
 import hashlib
 import pickle
-from utils_mp import load_chunk, load_chunk_safe
 from multiprocessing import Pool
 from itertools import chain
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler, BatchSampler
-from collator import Collator
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from torch.utils.data import DataLoader, Dataset, BatchSampler
 import time
-from datasets import concatenate_datasets
-from transformers import AutoTokenizer, get_scheduler, DataCollatorForWholeWordMask
 import argparse
 import json
 from typing import Union
 from typing import List, Iterator
-from transformers import DataCollatorForLanguageModeling
 import sys
 # Import masking strategies from mlm_dataset
 from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
@@ -113,10 +107,10 @@ class ChunkedDataset(Dataset):
             current_block.extend(seq_tokens)
             
             # While current block has enough tokens for a full block, create training blocks
-            while len(current_block) >= block_size - 2:  # Reserve space for [CLS] and [SEP]
+            while len(current_block) >= block_size:  # Reserve space for [CLS] and [SEP]
                 # Extract exactly block_size tokens for the training block
-                block_tokens = current_block[:block_size-2]
-                block_tokens = [self.cls_index] + block_tokens + [self.sep_index]  # Add [CLS] and [SEP]
+                block_tokens = current_block[:block_size]
+                block_tokens = block_tokens
                 all_tokens.extend(block_tokens)
                 
                 # Create index entry
@@ -130,6 +124,7 @@ class ChunkedDataset(Dataset):
         
         # Handle remaining tokens (if any) - add them if we have at least 2 tokens for MLM
         if len(current_block) >= 2:
+            current_block = current_block
             all_tokens.extend(current_block)
             start = current_pos
             end = current_pos + len(current_block)
@@ -510,118 +505,6 @@ def data_loader(config, tokenizer, cache_path):
                 "labels": labels_batch,
             }
 
-    # Legacy span masking function (kept for backward compatibility)
-    # span_masking_strategy = SpanMaskingStrategy(
-    #     mask_p=0.15,  # 15% masking probability
-    #     tokenizer=tokenizer,
-    #     n_special_tokens=n_special_tokens,
-    #     padding_label_id=-100,
-    #     random_p=0.1,  # 10% random token replacement
-    #     keep_p=0.1     # 10% keep original token
-    # )
-    
-    # def collate_fn_with_span_mask(examples):
-    #     # examples is a list of token ID lists
-    #     # Convert to tensors properly - check if already tensor or list
-    #     input_ids = []
-    #     for ex in examples:
-    #         if isinstance(ex, torch.Tensor):
-    #             input_ids.append(ex.detach().clone())
-    #         else:
-    #             input_ids.append(torch.tensor(ex, dtype=torch.long))
-        
-    #     # Pad sequences to the same length
-    #     max_len = max(len(seq) for seq in input_ids)
-    #     padded_input_ids = []
-    #     attention_masks = []
-    #     all_labels = []
-        
-    #     for seq in input_ids:
-    #         # Pad sequence
-    #         padding_length = max_len - len(seq)
-    #         padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
-            
-    #         # Apply span masking to the padded sequence
-    #         masked_tokens, labels = span_masking_strategy(padded_seq)
-            
-    #         padded_input_ids.append(masked_tokens)
-    #         all_labels.append(labels)
-            
-    #         # Create attention mask (1 for real tokens, 0 for padding)
-    #         attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-    #                                   torch.zeros(padding_length, dtype=torch.long)])
-    #         attention_masks.append(attention_mask)
-        
-    #     # Stack into batch tensors
-    #     input_ids_batch = torch.stack(padded_input_ids)
-    #     attention_mask_batch = torch.stack(attention_masks)
-    #     labels_batch = torch.stack(all_labels)
-        
-    #     return {
-    #         "input_ids": input_ids_batch,
-    #         "attention_mask": attention_mask_batch,
-    #         "labels": labels_batch,
-    #     }
-
-    # # Keep the original collate function as fallback
-    # def collate_fn_with_mask(examples):
-    #     # examples is a list of token ID lists
-    #     # Convert to tensors properly - check if already tensor or list
-    #     input_ids = []
-    #     for ex in examples:
-    #         if isinstance(ex, torch.Tensor):
-    #             input_ids.append(ex.detach().clone())
-    #         else:
-    #             input_ids.append(torch.tensor(ex, dtype=torch.long))
-        
-    #     # Pad sequences to the same length
-    #     max_len = max(len(seq) for seq in input_ids)
-    #     padded_input_ids = []
-    #     attention_masks = []
-        
-    #     for seq in input_ids:
-    #         # Pad sequence
-    #         padding_length = max_len - len(seq)
-    #         padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
-    #         padded_input_ids.append(padded_seq)
-            
-    #         # Create attention mask (1 for real tokens, 0 for padding)
-    #         attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-    #                                   torch.zeros(padding_length, dtype=torch.long)])
-    #         attention_masks.append(attention_mask)
-        
-        # # Stack into batch tensors
-        # input_ids_batch = torch.stack(padded_input_ids)
-        # attention_mask_batch = torch.stack(attention_masks)
-        
-        # # Apply MLM masking (15% probability)
-        # labels = input_ids_batch.clone()
-        
-        # # Create random mask for 15% of tokens (excluding special tokens)
-        # probability_matrix = torch.full(labels.shape, 0.15)
-        # special_tokens_mask = (labels == pad_id) | (labels == tokenizer.token_to_id("[CLS]")) | (labels == tokenizer.token_to_id("[SEP]"))
-        # probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
-        
-        # masked_indices = torch.bernoulli(probability_matrix).bool()
-        # labels[~masked_indices] = -100  # We only compute loss on masked tokens
-        
-        # # 80% of the time, replace masked input tokens with tokenizer.mask_token ([MASK])
-        # indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
-        # input_ids_batch[indices_replaced] = mask_token_id
-        
-        # # 10% of the time, replace masked input tokens with random word
-        # indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
-        # random_words = torch.randint(tokenizer.get_vocab_size(), labels.shape, dtype=torch.long)
-        # input_ids_batch[indices_random] = random_words[indices_random]
-        
-        # # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-        
-        # return {
-        #     "input_ids": input_ids_batch,
-        #     "attention_mask": attention_mask_batch,
-        #     "labels": labels,
-        # }
-
     # build dynamic, token‐based training batches
     max_tokens = config.get("max_tokens", config["block_size"] * config["batch_size"])
     print(f"{C.BLUE}Creating DataLoader with dynamic token batching (max_tokens={max_tokens})...{C.RESET}")
@@ -637,7 +520,6 @@ def data_loader(config, tokenizer, cache_path):
     
     train_loader = DataLoader(
         train_ds,
-        # batch_sampler=train_batch_sampler,
         batch_size=config["batch_size"],
         num_workers=2,  # Reduced to avoid deadlocks
         pin_memory=True,

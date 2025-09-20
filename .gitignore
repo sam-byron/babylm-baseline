@@ -5,3 +5,4 @@
 **/
 
 !tests/
+!auto_tests/

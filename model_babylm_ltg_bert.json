@@ -1,6 +1,6 @@
 {
-    "block_size": 64,
-    "batch_size": 512,
+    "block_size": 512,
+    "batch_size": 32,
     "grad_accum": 8,
     "num_epochs": 90,
     "vocab_size": 16384,
