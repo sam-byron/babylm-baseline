@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 import glob
@@ -18,7 +26,7 @@ def test_adaptive_masking():
     
     tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
     chunk_paths = sorted(glob.glob("model_babylm_bert_ltg/chunk*.pt"))[:10]
-    dataset = ChunkedDataset(chunk_paths, block_size=512, pad_token_id=tokenizer.token_to_id("[PAD]"))
+    dataset = ChunkedDataset(chunk_paths, block_size=512, tokenizer=tokenizer, pad_token_id=tokenizer.token_to_id("[PAD]"))
     
     # Create collator
     collate_fn = create_dynamic_collator(config, tokenizer)

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 import time
@@ -8,6 +16,9 @@ from data_loader import ChunkedDataset
 from tokenizers import Tokenizer
 from dynamic_collator import create_dynamic_collator
 from mlm_dataset import SpanMaskingStrategy
+
+# Change directory to parent dir
+os.chdir(parent_dir)
 
 def debug_masking_performance():
     """Compare dynamic vs static masking performance and correctness."""
@@ -20,7 +31,7 @@ def debug_masking_performance():
     
     tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
     chunk_paths = sorted(glob.glob("model_babylm_bert_ltg/chunk*.pt"))[:5]  # Use subset for testing
-    dataset = ChunkedDataset(chunk_paths, block_size=512, pad_token_id=tokenizer.token_to_id("[PAD]"))
+    dataset = ChunkedDataset(chunk_paths, block_size=config.get("block_size"), tokenizer=tokenizer, pad_token_id=tokenizer.token_to_id("[PAD]"))
     
     print(f"📊 Testing with {len(chunk_paths)} chunks, {len(dataset)} samples")
     
@@ -29,7 +40,7 @@ def debug_masking_performance():
     mask_token_id = tokenizer.token_to_id("[MASK]")
     
     # Test samples
-    test_samples = [dataset[i] for i in range(min(20, len(dataset)))]
+    test_samples = [dataset[i] for i in range(min(100, len(dataset)))]
     
     # ============= TEST DYNAMIC MASKING =============
     print(f"\\n🎭 TESTING DYNAMIC MASKING")

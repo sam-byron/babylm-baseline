@@ -4,6 +4,14 @@ Test dynamic padding approach where sequences keep natural lengths
 and are only padded to the batch maximum
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 from tokenizers import Tokenizer
 from dynamic_collator import create_dynamic_collator
@@ -113,17 +121,22 @@ def compare_approaches():
         batch_efficiency = batch_natural / batch_padded
         dynamic_wastes.append(batch_efficiency)
     
-    avg_dynamic_efficiency = sum(dynamic_wastes) / len(dynamic_wastes)
+    avg_dynamic_efficiency = sum(dynamic_wastes) / len(dynamic_wastes) if dynamic_wastes else 0.0
     
     print(f"\\n🔄 DYNAMIC PADDING (batch max, batch_size={batch_size}):")
-    print(f"  Average efficiency: {avg_dynamic_efficiency:.1%}")
-    print(f"  Average waste: {100-avg_dynamic_efficiency*100:.1f}% padding tokens")
+    if dynamic_wastes:
+        print(f"  Average efficiency: {avg_dynamic_efficiency:.1%}")
+        print(f"  Average waste: {100-avg_dynamic_efficiency*100:.1f}% padding tokens")
+    else:
+        print(f"  No valid batches found for comparison")
     
     print(f"\\n🎯 RECOMMENDATION:")
-    if avg_dynamic_efficiency > fixed_efficiency * 1.5:
+    if dynamic_wastes and avg_dynamic_efficiency > fixed_efficiency * 1.5:
         print(f"  ✅ Use DYNAMIC padding - {avg_dynamic_efficiency/fixed_efficiency:.1f}x more efficient")
-    else:
+    elif dynamic_wastes:
         print(f"  ⚖️  Both approaches have similar efficiency")
+    else:
+        print(f"  ⚠️  Cannot compare - insufficient data for batching")
 
 if __name__ == "__main__":
     test_dynamic_padding_approach()

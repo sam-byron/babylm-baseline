@@ -4,22 +4,32 @@ Comprehensive gradient calculation testing for LTG BERT model.
 Tests for numerical stability, gradient flow, and potential bugs.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import torch.nn as nn
 import numpy as np
 import json
 from transformers import AutoTokenizer
-from ltg_bert import LTGBertForMaskedLM
-from data_loader import create_data_loader
+from ltg_bert import LtgBertForMaskedLM
+from ltg_bert_config import LtgBertConfig
+from data_loader import data_loader
 
 def test_model_initialization():
     """Test if model weights are initialized properly"""
     print("🔍 Testing Model Initialization...")
     
     with open('model_babylm_ltg_bert.json', 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
     
-    model = LTGBertForMaskedLM(config)
+    config = LtgBertConfig(**config_dict)
+    model = LtgBertForMaskedLM(config)
     
     # Check for NaN/Inf in initial weights
     has_nan = False
@@ -59,14 +69,15 @@ def test_forward_pass():
     print("\n🔍 Testing Forward Pass...")
     
     with open('model_babylm_ltg_bert.json', 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
     
-    model = LTGBertForMaskedLM(config)
+    config = LtgBertConfig(**config_dict)
+    model = LtgBertForMaskedLM(config)
     
     # Create simple test input
     batch_size = 2
     seq_len = 128
-    vocab_size = config['vocab_size']
+    vocab_size = config.vocab_size
     
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
@@ -106,15 +117,16 @@ def test_gradient_computation():
     print("\n🔍 Testing Gradient Computation...")
     
     with open('model_babylm_ltg_bert.json', 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
     
-    model = LTGBertForMaskedLM(config)
+    config = LtgBertConfig(**config_dict)
+    model = LtgBertForMaskedLM(config)
     model.train()
     
     # Create simple test data
     batch_size = 2
     seq_len = 128
-    vocab_size = config['vocab_size']
+    vocab_size = config.vocab_size
     
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
@@ -182,14 +194,14 @@ def test_data_loading():
                                                 local_files_only=True, trust_remote_code=True)
         
         with open('model_babylm_ltg_bert.json', 'r') as f:
-            config = json.load(f)
+            config_dict = json.load(f)
         
+        config = LtgBertConfig(**config_dict)
         # Create data loader with small batch
-        data_loader = create_data_loader(
-            dataset_path='./data/pretrain/',
-            tokenizer=tokenizer,
+        train_loader, val_loader, test_loader, collate_fn, total_train_batches = data_loader(
             config=config,
-            batch_size=2
+            tokenizer=tokenizer,
+            cache_path=config.get('cache_path', 'cache_test')
         )
         
         # Get first batch
@@ -203,8 +215,8 @@ def test_data_loading():
                 if key == 'input_ids':
                     print(f"      range=[{value.min().item()}, {value.max().item()}]")
                     # Check for invalid token IDs
-                    if value.min() < 0 or value.max() >= config['vocab_size']:
-                        print(f"❌ Invalid token IDs detected! vocab_size={config['vocab_size']}")
+                    if value.min() < 0 or value.max() >= config.vocab_size:
+                        print(f"❌ Invalid token IDs detected! vocab_size={config.vocab_size}")
         
         return True, batch
         
@@ -217,14 +229,15 @@ def test_loss_scaling():
     print("\n🔍 Testing Loss Scaling...")
     
     with open('model_babylm_ltg_bert.json', 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
     
-    model = LTGBertForMaskedLM(config)
+    config = LtgBertConfig(**config_dict)
+    model = LtgBertForMaskedLM(config)
     
     # Test with different loss scaling
     batch_size = 2
     seq_len = 128
-    vocab_size = config['vocab_size']
+    vocab_size = config.vocab_size
     
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
@@ -246,13 +259,14 @@ def test_learning_rate_sensitivity():
     print("\n🔍 Testing Learning Rate Sensitivity...")
     
     with open('model_babylm_ltg_bert.json', 'r') as f:
-        config = json.load(f)
+        config_dict = json.load(f)
     
-    model = LTGBertForMaskedLM(config)
+    config = LtgBertConfig(**config_dict)
+    model = LtgBertForMaskedLM(config)
     
     batch_size = 2
     seq_len = 128
-    vocab_size = config['vocab_size']
+    vocab_size = config.vocab_size
     
     input_ids = torch.randint(0, vocab_size, (batch_size, seq_len))
     attention_mask = torch.ones_like(input_ids)
@@ -262,7 +276,7 @@ def test_learning_rate_sensitivity():
     
     for lr in learning_rates:
         # Create fresh model copy
-        model_copy = LTGBertForMaskedLM(config)
+        model_copy = LtgBertForMaskedLM(config)
         model_copy.load_state_dict(model.state_dict())
         
         optimizer = torch.optim.AdamW(model_copy.parameters(), lr=lr)

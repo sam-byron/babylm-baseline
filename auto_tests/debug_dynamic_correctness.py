@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 import glob
@@ -12,13 +20,16 @@ def debug_dynamic_masking_correctness():
     print("🔍 DEBUGGING DYNAMIC MASKING CORRECTNESS")
     print("=" * 60)
     
+    # Change directory to parent dir
+    os.chdir(parent_dir)
+
     # Load configuration
     with open("model_babylm_ltg_bert.json", "r") as f:
         config = json.load(f)
     
     tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
     chunk_paths = sorted(glob.glob("model_babylm_bert_ltg/chunk*.pt"))[:2]
-    dataset = ChunkedDataset(chunk_paths, block_size=512, pad_token_id=tokenizer.token_to_id("[PAD]"))
+    dataset = ChunkedDataset(chunk_paths, block_size=config.get("block_size"), tokenizer=tokenizer, pad_token_id=tokenizer.token_to_id("[PAD]"))
     
     # Create dynamic collator
     dynamic_collator = create_dynamic_collator(config, tokenizer)
@@ -28,7 +39,9 @@ def debug_dynamic_masking_correctness():
     mask_token_id = tokenizer.token_to_id("[MASK]")
     
     # Test same sample multiple times (simulating multiple epochs)
-    test_sample = dataset[0]
+    # concatenate dataset[0], dataset[1], dataset[2], ... dataset[10]
+    test_sample = torch.cat([dataset[i] for i in range(100)], dim=0)
+    
     
     print(f"📊 Testing dynamic masking consistency...")
     print(f"Sample shape: {test_sample.shape}")
@@ -190,9 +203,10 @@ def debug_adaptive_masking_logic():
         
         print(f"\\nSequence {i+1}: {content_count} content tokens")
         
-        # Test masking 3 times
+        # Test masking 1000 times
         masking_rates = []
-        for trial in range(3):
+        trials = 1000
+        for trial in range(1000):
             batch = dynamic_collator([seq])
             labels = batch['labels'][0]
             
@@ -201,7 +215,7 @@ def debug_adaptive_masking_logic():
             masking_rates.append(rate)
         
         avg_rate = sum(masking_rates) / len(masking_rates)
-        print(f"  Masking rates: {[f'{r:.1f}%' for r in masking_rates]} (avg: {avg_rate:.1f}%)")
+        print(f"   (avg: {avg_rate:.1f}%) (number of trials: {trials})")
         
         # Check if adaptive logic is working
         if content_count < 5:

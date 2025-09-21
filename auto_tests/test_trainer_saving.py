@@ -3,6 +3,14 @@
 Test that our save_model_official_way function in transformer_trainer.py is working correctly.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import sys
 import os
 sys.path.insert(0, os.getcwd())

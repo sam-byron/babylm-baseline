@@ -5,6 +5,14 @@ This script demonstrates the difference between static and dynamic masking,
 showing how RoBERTa-style dynamic masking multiplies the training signal.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 from tokenizer import Tokenizer

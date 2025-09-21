@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 from pathlib import Path
@@ -30,7 +38,7 @@ def final_validation_test():
     pad_id = tokenizer.token_to_id("[PAD]")
     
     print(f"\n📈 Creating ChunkedDataset...")
-    dataset = ChunkedDataset(chunk_paths, block_size=block_size, pad_token_id=pad_id)
+    dataset = ChunkedDataset(chunk_paths, block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
     
     # === CONCATENATION VALIDATION ===
     print(f"\n🔗 CONCATENATION VALIDATION:")

@@ -4,6 +4,14 @@ Quick diagnostic for gradient explosion issues.
 Run this to check if the problem is in model, data, or training setup.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import torch.nn as nn
 import json
@@ -26,7 +34,7 @@ def quick_gradient_test():
         num_hidden_layers=config_dict['num_hidden_layers'],
         num_attention_heads=config_dict['num_attention_heads'],
         intermediate_size=config_dict['intermediate_size'],
-        max_position_embeddings=config_dict['max_position_embeddings'],
+        max_position_embeddings=config_dict.get('max_position_embeddings', config_dict.get('block_size', 512)),
         position_bucket_size=config_dict['position_bucket_size'],
         layer_norm_eps=config_dict['layer_norm_eps'],
         hidden_dropout_prob=config_dict['hidden_dropout_prob'],

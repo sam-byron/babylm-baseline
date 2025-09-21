@@ -74,7 +74,7 @@ def save_model_official_way(model, model_config, tokenizer, checkpoint_path):
     print(f"{C.BOLD}{C.GREEN}Model saved the official HuggingFace way! Ready for lm_eval with trust_remote_code=True{C.RESET}")
 
 # @torch.compile
-def build_model(checkpoint_path):
+def build_model(checkpoint_path, config_file):
     # Use the proper config saving function from save_config.py
     save_ltg_bert_config("./configs/base.json", checkpoint_path)
     
@@ -89,6 +89,9 @@ def build_model(checkpoint_path):
     # copy ltg_bert.py and ltg_bert_config.py to the checkpoint directory
     shutil.copy2("ltg_bert.py", checkpoint_path)
     shutil.copy2("ltg_bert_config.py", checkpoint_path)
+    # copy config_file to the checkpoint directory using same name
+    shutil.copy2(config_file, checkpoint_path)
+
     print(f"{C.GREEN}Model initialized and saved to {checkpoint_path}{C.RESET}")
 
     return model
@@ -524,7 +527,7 @@ def main():
     train_loader, val_loader, test_loader, collate_fn, total_tokens_train = data_loader(config, tokenizer, config["cache_path"])
     print(f"{C.GREEN}Data loaders created successfully{C.RESET}")
     # Build the GPT-2 model from scratch based on our config
-    model = build_model(checkpoint_path)
+    model = build_model(checkpoint_path, args.config_path)
     
     # # Enable gradient checkpointing for memory efficiency but comes at a speed penalty of 15-20%s
     # if hasattr(model, 'gradient_checkpointing_enable'):
@@ -647,21 +650,21 @@ def main():
         # —––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     
     # Scheduler with auto warmup fraction if not provided
-    total_steps = config["num_epochs"] * len(train_loader)
-    warmup_cfg = int(config.get("warmup_steps_proportion", 0))
-    # warmup_steps = warmup_cfg if warmup_cfg > 0 else max(1, int(0.06 * total_steps))
-    if accelerator.is_main_process and warmup_cfg <= 0:
-        print(f"{C.BLUE}Using warmup_steps_proportion={warmup_cfg}% of {total_steps} steps{C.RESET}")
+    # total_steps = config["num_epochs"] * len(train_loader)
+    # warmup_cfg = int(config.get("warmup_steps_proportion", 0))
+    # # warmup_steps = warmup_cfg if warmup_cfg > 0 else max(1, int(0.06 * total_steps))
+    # if accelerator.is_main_process and warmup_cfg <= 0:
+    #     print(f"{C.BLUE}Using warmup_steps_proportion={warmup_cfg}% of {total_steps} steps{C.RESET}")
 
-    scheduler = get_scheduler(
-        "cosine",
-        optimizer=optimizer,
-        num_warmup_steps=warmup_cfg*total_steps,
-        num_training_steps=total_steps,
-    )
+    # scheduler = get_scheduler(
+    #     "cosine",
+    #     optimizer=optimizer,
+    #     num_warmup_steps=warmup_cfg*total_steps,
+    #     num_training_steps=total_steps,
+    # )
 
     # Ensure the scheduler is part of the checkpoint state
-    # accelerator.register_for_checkpointing(scheduler)
+    accelerator.register_for_checkpointing(scheduler)
 
     if checkpoint_path and os.path.isdir(checkpoint_path) and os.listdir(checkpoint_path):
         try:

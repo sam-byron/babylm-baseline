@@ -4,6 +4,14 @@ Solutions to prevent AutoModel loading errors with custom LTG BERT models.
 This addresses the transformers_modules registration issue.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import os
 import json
 import torch
@@ -134,8 +142,8 @@ def solution_4_registration_helper():
     def ensure_ltg_bert_registered():
         """Ensure LTG BERT is registered with transformers."""
         try:
-            # Check if already registered by trying to get the config
-            AutoConfig.get_config_class("ltg_bert")
+            # Try to create a config to check if registered
+            AutoConfig.for_model("ltg_bert", vocab_size=1000)
             print("✅ LTG BERT already registered")
         except (KeyError, ValueError):
             # Not registered, so register it

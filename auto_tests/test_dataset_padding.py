@@ -4,6 +4,14 @@ Test the updated configuration where ChunkedDataset handles padding
 and dynamic_collator only handles masking
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 from tokenizers import Tokenizer
 from dynamic_collator import create_dynamic_collator
@@ -31,9 +39,7 @@ def test_dataset_padding_workflow():
     chunk_paths = ['model_babylm_bert_ltg/chunk184.pt']  # Use our regenerated chunk
     
     dataset = ChunkedDataset(
-        chunk_paths=chunk_paths, 
-        block_size=block_size, 
-        pad_token_id=pad_id
+        chunk_paths=chunk_paths, block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id
     )
     
     print(f"\\n📊 Dataset created with {len(dataset)} samples")

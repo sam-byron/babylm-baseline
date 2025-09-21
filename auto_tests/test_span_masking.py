@@ -4,6 +4,14 @@ Comprehensive test suite for SpanMaskingStrategy class.
 Tests masking rate, span patterns, and compliance with 80/10/10 rule.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import numpy as np
 import random
@@ -414,7 +422,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Test SpanMaskingStrategy")
-    parser.add_argument("--tokenizer", type=str, default="tokenizer.json", 
+    parser.add_argument("--tokenizer", type=str, default="data/pretrain/wordpiece_vocab.json", 
                        help="Path to tokenizer file")
     parser.add_argument("--sequences", type=int, default=1000, 
                        help="Number of test sequences")

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 from ltg_bert import LtgBertForMaskedLM
@@ -22,7 +30,7 @@ def test_model_gradients():
         num_hidden_layers=config["num_hidden_layers"],
         num_attention_heads=config["num_attention_heads"],
         intermediate_size=config["intermediate_size"],
-        max_position_embeddings=config["max_position_embeddings"],
+        max_position_embeddings=config.get('max_position_embeddings', config.get('block_size', 512)),
         layer_norm_eps=config["layer_norm_eps"],
         attention_probs_dropout_prob=config["attention_probs_dropout_prob"],
         hidden_dropout_prob=config["hidden_dropout_prob"]
@@ -135,7 +143,7 @@ def test_model_gradients():
             num_hidden_layers=3,  # Smaller for testing
             num_attention_heads=config["num_attention_heads"],
             intermediate_size=config["intermediate_size"],
-            max_position_embeddings=config["max_position_embeddings"],
+            max_position_embeddings=config.get('max_position_embeddings', config.get('block_size', 512)),
             layer_norm_eps=eps,  # Different epsilon
             attention_probs_dropout_prob=0.0,  # No dropout for testing
             hidden_dropout_prob=0.0

@@ -4,6 +4,14 @@ Simple test runner for BLiMP evaluation tests.
 Run with: python run_tests.py
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import sys
 import os
 import unittest

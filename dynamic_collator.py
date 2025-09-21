@@ -22,6 +22,7 @@ class DynamicMaskingCollator:
         pad_to_multiple_of: Optional[int] = None,
         return_tensors: str = "pt",
         max_span_length: int = 10,
+        seq_length: int = 128,
     ):
         self.tokenizer = tokenizer
         self.mlm_probability = mlm_probability
@@ -31,12 +32,19 @@ class DynamicMaskingCollator:
         self.pad_to_multiple_of = pad_to_multiple_of
         self.return_tensors = return_tensors
         self.max_span_length = max_span_length
+        self.seq_length = seq_length
         
         # Get special token IDs
         self.pad_token_id = tokenizer.token_to_id("[PAD]")
         self.mask_token_id = tokenizer.token_to_id("[MASK]")
         self.cls_token_id = tokenizer.token_to_id("[CLS]")
         self.sep_token_id = tokenizer.token_to_id("[SEP]")
+        
+        # Create special_token_ids property for convenience
+        self.special_token_ids = set([
+            self.pad_token_id, self.mask_token_id,
+            self.cls_token_id, self.sep_token_id
+        ])
         
         # Initialize the masking strategy - REUSE existing implementation!
         n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
@@ -60,6 +68,7 @@ class DynamicMaskingCollator:
                 random_p=random_probability,
                 keep_p=keep_probability,
                 max_span_length=max_span_length,
+                # seq_length=self.seq_length,
             )
         else:   
             self.masking_strategy_instance = masking_strategy_class(
@@ -69,6 +78,7 @@ class DynamicMaskingCollator:
                 padding_label_id=-100,
                 random_p=random_probability,
                 keep_p=keep_probability,
+                # seq_length=self.seq_length,
             )
         
         print(f"🎭 Dynamic collator using {masking_strategy} masking strategy (reusing mlm_dataset implementation)")
@@ -132,6 +142,7 @@ def create_dynamic_collator(config, tokenizer):
     mlm_probability = config.get("mask_p", 0.15)
     random_probability = config.get("random_p", 0.1)
     keep_probability = config.get("keep_p", 0.1)
+    seq_length = config.get("block_size", 512)
 
     if config.get("masking_strategy") == "span":
         max_span_length = config.get("max_span_length", 10)
@@ -143,6 +154,7 @@ def create_dynamic_collator(config, tokenizer):
             keep_probability=keep_probability,
             masking_strategy=masking_strategy,
             max_span_length=max_span_length,
+            seq_length=seq_length,
         )
     else:
         return DynamicMaskingCollator(
@@ -151,4 +163,5 @@ def create_dynamic_collator(config, tokenizer):
             random_probability=random_probability,
             keep_probability=keep_probability,
             masking_strategy=masking_strategy,
+            seq_length=seq_length,
         )

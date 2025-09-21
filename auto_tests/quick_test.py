@@ -4,22 +4,26 @@ Quick test runner for the simplified BLIMP tests.
 Usage: python quick_test.py
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import sys
 import os
 import subprocess
 
 # Add conda activation to the environment
 def run_with_conda():
-    """Run the tests with conda environment activated."""
+    """Run the tests directly without conda activation (already in environment)."""
     
-    conda_cmd = """
-cd /home/sam-byron/engineering/ML/playground/babylm/bnc/bl-bnc-custom-ltg-bert && \
-conda activate torch-black && \
-python test_blimp_simple.py
-"""
-    
+    # Since we're already in the torch-black environment, just run the test directly
     try:
-        result = subprocess.run(conda_cmd, shell=True, capture_output=True, text=True, executable='/bin/bash')
+        result = subprocess.run([sys.executable, "auto_tests/test_blimp_simple.py"], 
+                              capture_output=True, text=True, cwd="/home/sam-byron/engineering/ML/playground/babylm/bnc/bl-bnc-custom-ltg-bert")
         
         print("=== TEST OUTPUT ===")
         print(result.stdout)

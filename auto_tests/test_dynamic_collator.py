@@ -4,6 +4,14 @@ Comprehensive test suite for dynamic_collator.py
 Tests RoBERTa-style dynamic masking with detailed statistics and span analysis.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import numpy as np
 import random
@@ -533,7 +541,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Test DynamicMaskingCollator")
-    parser.add_argument("--tokenizer", type=str, default="tokenizer.json", help="Path to tokenizer file")
+    parser.add_argument("--tokenizer", type=str, default="data/pretrain/wordpiece_vocab.json", help="Path to tokenizer file")
     parser.add_argument("--batches", type=int, default=50, help="Number of test batches")
     parser.add_argument("--batch_size", type=int, default=24, help="Batch size")
     parser.add_argument("--seq_length", type=int, default=512, help="Sequence length")

@@ -2,6 +2,14 @@
 Quick test to verify dynamic masking integration with the training pipeline.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import json
 import torch
 from tokenizer import Tokenizer

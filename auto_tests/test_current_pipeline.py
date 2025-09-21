@@ -3,6 +3,14 @@
 Test your current data loading pipeline to verify MLM masking is working correctly.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import json
 import torch
 from tokenizer import Tokenizer
@@ -144,7 +152,7 @@ def debug_training_batch():
         num_hidden_layers=config['num_hidden_layers'],
         num_attention_heads=config['num_attention_heads'],
         intermediate_size=config['intermediate_size'],
-        max_position_embeddings=config['max_position_embeddings'],
+        max_position_embeddings=config.get('max_position_embeddings', config.get('block_size', 512)),
         position_bucket_size=config['position_bucket_size'],
         layer_norm_eps=config['layer_norm_eps'],
         hidden_dropout_prob=config['hidden_dropout_prob'],

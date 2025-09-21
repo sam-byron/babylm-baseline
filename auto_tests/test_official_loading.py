@@ -3,6 +3,14 @@
 Test script to verify the official model works exactly like lm_eval would use it.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 import torch
 

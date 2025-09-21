@@ -1,0 +1,516 @@
+{
+  "summary": {
+    "total": 59,
+    "successful": 33,
+    "failed": 26,
+    "success_rate": 55.932203389830505
+  },
+  "error_groups": {
+    "TIMEOUT": [
+      "debug_collator_comparison.py",
+      "detailed_batch_analysis.py",
+      "run_all_tests.py",
+      "run_complete_pipeline.py",
+      "run_data_loader_tests.py",
+      "specialized_tests.py",
+      "test_current_pipeline.py",
+      "test_dynamic_collator.py",
+      "test_fixed_masking.py",
+      "test_gradient_calculation.py",
+      "test_gradient_stability.py",
+      "test_pipeline_integration.py",
+      "test_proper_masking.py",
+      "test_real_chunks.py",
+      "test_real_data.py",
+      "test_span_masking.py"
+    ],
+    "OTHER": [
+      "quick_dynamic_test.py",
+      "quick_test.py",
+      "run_tests.py",
+      "test_blimp.py",
+      "test_blimp_simple.py",
+      "test_data_loader.py",
+      "test_long_sequences.py",
+      "test_padding_comparison.py",
+      "test_pipeline_ready.py"
+    ],
+    "CUDA_OOM": [
+      "run_stress_tests.py"
+    ]
+  },
+  "results": [
+    {
+      "script": "debug_collator_comparison.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "debug_dynamic_correctness.py",
+      "success": true,
+      "duration": 1.27,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "debug_masking.py",
+      "success": true,
+      "duration": 0.87,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "debug_masking_comparison.py",
+      "success": true,
+      "duration": 1.73,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "debug_short_masking.py",
+      "success": true,
+      "duration": 0.86,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "detailed_batch_analysis.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "final_validation_test.py",
+      "success": true,
+      "duration": 2.47,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "fix_automodel_errors.py",
+      "success": true,
+      "duration": 5.98,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "fix_config_keys.py",
+      "success": true,
+      "duration": 0.02,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "fix_imports.py",
+      "success": true,
+      "duration": 0.02,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "quick_dynamic_test.py",
+      "success": false,
+      "duration": 0.86,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": ""
+    },
+    {
+      "script": "quick_gradient_test.py",
+      "success": true,
+      "duration": 5.3,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "quick_test.py",
+      "success": false,
+      "duration": 0.2,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": ""
+    },
+    {
+      "script": "run_all_tests.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "run_complete_pipeline.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "run_data_loader_tests.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "run_stress_tests.py",
+      "success": false,
+      "duration": 7.2,
+      "returncode": 1,
+      "error_type": "CUDA_OOM",
+      "stderr_preview": "Traceback (most recent call last):\n  File \"/home/sam-byron/engineering/ML/playground/babylm/bnc/bl-bnc-custom-ltg-bert/auto_tests/run_stress_tests.py\", line 405, in <module>\n    exit(main())\n         ..."
+    },
+    {
+      "script": "run_tests.py",
+      "success": false,
+      "duration": 4.17,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": "test_token_conversion_basic (test_blimp.TestBlimpTokenization.test_token_conversion_basic)\nTest basic token to ID conversion. ... FAIL\ntest_unknown_token_handling (test_blimp.TestBlimpTokenization.tes..."
+    },
+    {
+      "script": "simple_debug.py",
+      "success": true,
+      "duration": 1.05,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "simple_masking_test.py",
+      "success": true,
+      "duration": 1.13,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "simple_weight_transfer.py",
+      "success": true,
+      "duration": 4.57,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "specialized_tests.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test.py",
+      "success": true,
+      "duration": 8.76,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": "/home/sam-byron/miniconda/envs/torch-black/lib/python3.13/site-packages/transformers/configuration_utils.py:394: UserWarning: Some non-default generation parameters are set in the model config. These ..."
+    },
+    {
+      "script": "test_adaptive_masking.py",
+      "success": true,
+      "duration": 2.25,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_blimp.py",
+      "success": false,
+      "duration": 4.55,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": "test_parse_arguments_custom (__main__.TestBlimpArgumentParsing.test_parse_arguments_custom)\nTest parsing with custom arguments. ... ok\ntest_parse_arguments_defaults (__main__.TestBlimpArgumentParsing...."
+    },
+    {
+      "script": "test_blimp_simple.py",
+      "success": false,
+      "duration": 4.24,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": "test_argument_parsing (__main__.TestBlimpCore.test_argument_parsing)\nTest that argument parsing works correctly. ... ok\ntest_basic_token_conversion (__main__.TestBlimpCore.test_basic_token_conversion)..."
+    },
+    {
+      "script": "test_comprehensive_fix.py",
+      "success": true,
+      "duration": 5.65,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_concatenation.py",
+      "success": true,
+      "duration": 3.56,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_current_pipeline.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_data_loader.py",
+      "success": false,
+      "duration": 1.13,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": "Traceback (most recent call last):\n  File \"/home/sam-byron/engineering/ML/playground/babylm/bnc/bl-bnc-custom-ltg-bert/auto_tests/test_data_loader.py\", line 24, in <module>\n    import matplotlib.pyplo..."
+    },
+    {
+      "script": "test_dataset_padding.py",
+      "success": true,
+      "duration": 1.67,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_dynamic_collator.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_dynamic_masking.py",
+      "success": true,
+      "duration": 1.15,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_fixed_dynamic.py",
+      "success": true,
+      "duration": 1.32,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_fixed_masking.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_gradient_calculation.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_gradient_stability.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_initialization.py",
+      "success": true,
+      "duration": 8.74,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_long_sequences.py",
+      "success": false,
+      "duration": 1.13,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_ltg_bert_config.py",
+      "success": true,
+      "duration": 5.09,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_masking_rate.py",
+      "success": true,
+      "duration": 1.32,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_model_initialization.py",
+      "success": true,
+      "duration": 4.4,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_model_loading.py",
+      "success": true,
+      "duration": 3.72,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_official_loading.py",
+      "success": true,
+      "duration": 2.6,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": "Traceback (most recent call last):\n  File \"/home/sam-byron/miniconda/envs/torch-black/lib/python3.13/site-packages/huggingface_hub/utils/_http.py\", line 409, in hf_raise_for_status\n    response.raise_..."
+    },
+    {
+      "script": "test_padding_comparison.py",
+      "success": false,
+      "duration": 1.58,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": "Traceback (most recent call last):\n  File \"/home/sam-byron/engineering/ML/playground/babylm/bnc/bl-bnc-custom-ltg-bert/auto_tests/test_padding_comparison.py\", line 138, in <module>\n    compare_approac..."
+    },
+    {
+      "script": "test_parameter_sharing.py",
+      "success": true,
+      "duration": 4.93,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_pipeline_integration.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_pipeline_ready.py",
+      "success": false,
+      "duration": 1.96,
+      "returncode": 1,
+      "error_type": "OTHER",
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_proper_masking.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_real_chunks.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_real_data.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_sequence_classification.py",
+      "success": true,
+      "duration": 3.77,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_simple_classification.py",
+      "success": true,
+      "duration": 4.47,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_span_masking.py",
+      "success": false,
+      "duration": 20,
+      "returncode": -1,
+      "error_type": "TIMEOUT",
+      "stderr_preview": "Timeout after 20s"
+    },
+    {
+      "script": "test_tokenization_fix.py",
+      "success": true,
+      "duration": 1.13,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_tokenizer.py",
+      "success": true,
+      "duration": 0.04,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_trainer_saving.py",
+      "success": true,
+      "duration": 7.47,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_training_data.py",
+      "success": true,
+      "duration": 1.3,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    },
+    {
+      "script": "test_transferred_models.py",
+      "success": true,
+      "duration": 4.21,
+      "returncode": 0,
+      "error_type": null,
+      "stderr_preview": ""
+    }
+  ]
+}

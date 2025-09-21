@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import json
 import glob
@@ -11,13 +19,18 @@ def compare_collator_outputs():
     print("🔍 COMPARING DYNAMIC VS STATIC COLLATOR OUTPUTS")
     print("=" * 60)
     
+    # change directory to parent for relative paths
+    os.chdir(parent_dir)
+
     # Load configuration  
     with open("model_babylm_ltg_bert.json", "r") as f:
         config = json.load(f)
     
     tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
     chunk_paths = sorted(glob.glob("model_babylm_bert_ltg/chunk*.pt"))[:2]
-    dataset = ChunkedDataset(chunk_paths, block_size=512, pad_token_id=tokenizer.token_to_id("[PAD]"))
+    # Change back to current directory
+    # os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    dataset = ChunkedDataset(chunk_paths, block_size=config.get("block_size", 512), tokenizer=tokenizer, pad_token_id=tokenizer.token_to_id("[PAD]"))
     
     # Get a test sample
     test_samples = [dataset[i] for i in range(3)]

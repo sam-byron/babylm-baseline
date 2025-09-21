@@ -3,6 +3,14 @@
 Test dynamic collator with real chunk data from model_babylm_bert_ltg folder.
 """
 
+
+# Add parent directory to path for imports
+import os
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import torch
 import numpy as np
 import random
