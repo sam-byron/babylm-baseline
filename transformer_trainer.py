@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import json
 import math
@@ -18,9 +19,10 @@ import traceback
 from datetime import timedelta
 # import torch.distributed as dist
 from config import BertConfig
+from training_monitor import TrainingMonitor
 
-from ltg_bert import LtgBertForMaskedLM
-from ltg_bert_config import LtgBertConfig
+from modeling_ltgbert import LtgBertForMaskedLM
+from configuration_ltgbert import LtgBertConfig
 from save_config import save_ltg_bert_config
 
 from tokenizer import Tokenizer
@@ -29,6 +31,10 @@ import shutil
 from lamb import Lamb
 
 import torch.nn.functional as F
+from training_utils import (
+    log_first_batch_info, forward_pass, gradient_step, 
+    update_progress_bars, save_checkpoint
+)
 
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
 # import os
@@ -78,7 +84,7 @@ def save_model_official_way(model, model_config, tokenizer, checkpoint_path):
 # @torch.compile
 def build_model(checkpoint_path, config_file):
     # Use the proper config saving function from save_config.py
-    save_ltg_bert_config("./configs/base.json", checkpoint_path)
+    save_ltg_bert_config("./configs/config.json", checkpoint_path)
     
     # Load the saved config
     transformers_config = LtgBertConfig.from_pretrained(checkpoint_path)
@@ -88,9 +94,9 @@ def build_model(checkpoint_path, config_file):
 
     # Copy source files with proper naming convention
     model_type = transformers_config.model_type
-    # copy ltg_bert.py and ltg_bert_config.py to the checkpoint directory
-    shutil.copy2("ltg_bert.py", checkpoint_path)
-    shutil.copy2("ltg_bert_config.py", checkpoint_path)
+    # copy modeling_ltgbert.py and configuration_ltgbert.py to the checkpoint directory
+    shutil.copy2("modeling_ltgbert.py", checkpoint_path)
+    shutil.copy2("configuration_ltgbert.py", checkpoint_path)
     # copy config_file to the checkpoint directory using same name
     shutil.copy2(config_file, checkpoint_path)
 
@@ -101,83 +107,6 @@ def build_model(checkpoint_path, config_file):
 import time
 import datetime
 
-class TrainingMonitor:
-    """Monitor training stability and detect issues"""
-    def __init__(self, window_size=20, spike_threshold=0.5, oscillation_threshold=0.1):
-        self.window_size = window_size
-        self.spike_threshold = spike_threshold  # Relative increase that counts as a spike
-        self.oscillation_threshold = oscillation_threshold  # StdDev threshold for oscillation detection
-        
-        self.loss_history = []
-        self.grad_norm_history = []
-        self.lr_history = []
-        
-        self.spike_count = 0
-        self.oscillation_count = 0
-        self.explosion_count = 0
-        
-    def update(self, loss, grad_norm, lr, step):
-        """Update monitoring with new values"""
-        self.loss_history.append(loss)
-        self.grad_norm_history.append(grad_norm)
-        self.lr_history.append(lr)
-        
-        # Keep only recent history
-        if len(self.loss_history) > self.window_size * 2:
-            self.loss_history = self.loss_history[-self.window_size:]
-            self.grad_norm_history = self.grad_norm_history[-self.window_size:]
-            self.lr_history = self.lr_history[-self.window_size:]
-    
-    def check_loss_spike(self):
-        """Detect sudden loss increases"""
-        if len(self.loss_history) < 3:
-            return False, ""
-            
-        recent_loss = self.loss_history[-1]
-        prev_loss = self.loss_history[-2]
-        
-        if prev_loss > 0 and (recent_loss - prev_loss) / prev_loss > self.spike_threshold:
-            self.spike_count += 1
-            return True, f"Loss spike detected: {prev_loss:.4f} → {recent_loss:.4f} (+{((recent_loss-prev_loss)/prev_loss)*100:.1f}%)"
-        return False, ""
-    
-    def check_oscillation(self):
-        """Detect loss oscillation in recent window"""
-        if len(self.loss_history) < self.window_size:
-            return False, ""
-            
-        recent_losses = self.loss_history[-self.window_size:]
-        mean_loss = sum(recent_losses) / len(recent_losses)
-        variance = sum((l - mean_loss) ** 2 for l in recent_losses) / len(recent_losses)
-        std_dev = variance ** 0.5
-        
-        if mean_loss > 0 and (std_dev / mean_loss) > self.oscillation_threshold:
-            self.oscillation_count += 1
-            return True, f"Loss oscillation detected: std/mean = {(std_dev/mean_loss)*100:.1f}% (threshold: {self.oscillation_threshold*100:.1f}%)"
-        return False, ""
-    
-    def check_gradient_explosion(self, max_grad_norm=1.0):
-        """Detect gradient explosion"""
-        if len(self.grad_norm_history) < 2:
-            return False, ""
-            
-        recent_grad = self.grad_norm_history[-1]
-        if recent_grad >= max_grad_norm * 0.98:  # Only trigger very close to actual clipping
-            self.explosion_count += 1
-            return True, f"Gradient norm near explosion: {recent_grad:.4f} (max: {max_grad_norm})"
-        return False, ""
-    
-    def get_stats(self):
-        """Get monitoring statistics"""
-        if not self.loss_history:
-            return "No data yet"
-            
-        recent_loss = self.loss_history[-1]
-        recent_grad = self.grad_norm_history[-1] if self.grad_norm_history else 0
-        recent_lr = self.lr_history[-1] if self.lr_history else 0
-        
-        return (f"Recent: loss={recent_loss:.4f}, grad_norm={recent_grad:.4f}, lr={recent_lr:.2e} | "
-                f"Issues: spikes={self.spike_count}, oscillations={self.oscillation_count}, explosions={self.explosion_count}")
 
 def train_loop(
     accelerator,
@@ -253,201 +182,39 @@ def train_loop(
         )
 
         for step, batch in enumerate(train_loader):
-            if step == 0:
-                accelerator.print(f"{C.GREEN}Starting first batch processing... Batch keys: {list(batch.keys())}{C.RESET}")
-                accelerator.print(f"{C.CYAN}Batch shapes - input_ids: {batch['input_ids'].shape}, attention_mask: {batch['attention_mask'].shape}, labels: {batch['labels'].shape}{C.RESET}")
-            
             with accelerator.accumulate(model):
                 with accelerator.autocast():
+                    # Forward pass
+                    loss = forward_pass(model, batch)
+                    
+                    # Log first batch details for debugging
                     if step == 0:
-                        accelerator.print(f"{C.YELLOW}About to run model forward pass...{C.RESET}")
-                    # print(f"[Epoch {epoch+1}] Processing batch {step+1}/{total_batches} (size={len(batch)})")
-                    # convert batch["attention_mask"] to bool
-                    batch["attention_mask"] = (batch["attention_mask"] == 0)
-                    target_ids = batch["labels"].t()
-                    prediction = model(
-                        batch["input_ids"].t(),
-                        batch["attention_mask"],
-                        target_ids,
-                    )
-                    target_ids = target_ids.flatten()
-                    target_ids = target_ids[target_ids != -100]
-                    loss = F.cross_entropy(prediction[0], target_ids)
-                    if step == 0:
-                        accelerator.print(f"{C.GREEN}Model forward pass completed, loss: {loss}{C.RESET}")
-                        # Debug: Check how many tokens are being masked
-                        masked_tokens = (batch["labels"] != -100).sum().item()
-                        total_tokens = batch["labels"].numel()
-                        masking_ratio = masked_tokens / total_tokens
-                        accelerator.print(f"{C.CYAN}Masked tokens: {masked_tokens}/{total_tokens} ({masking_ratio:.1%}){C.RESET}")
-                        
-                        # Check label distribution
-                        unique_labels = torch.unique(batch["labels"][batch["labels"] != -100])
-                        accelerator.print(f"{C.CYAN}Unique masked labels: {len(unique_labels)} (vocab size: {tokenizer.get_vocab_size()}){C.RESET}")
-                        
-                        # Sample some of the actual tokens being masked
-                        sample_labels = batch["labels"][batch["labels"] != -100][:20]  # First 20 masked tokens
-                        sample_tokens = [tokenizer.id_to_token(int(label)) for label in sample_labels if int(label) < tokenizer.get_vocab_size()]
-                        accelerator.print(f"{C.CYAN}Sample masked tokens: {sample_tokens[:10]}{C.RESET}")
-                        
-                        # Check the full input to see vocabulary diversity
-                        all_input_tokens = torch.unique(batch["input_ids"])
-                        accelerator.print(f"{C.CYAN}Unique tokens in input_ids: {len(all_input_tokens)}/{tokenizer.get_vocab_size()}{C.RESET}")
-                        
-                        # Print shape of batch
-                        accelerator.print(f"{C.CYAN}Batch input_ids shape: {batch['input_ids'].shape}{C.RESET}")
-                        # Sample some input tokens to see what we're working with
-                        sample_input_ids = batch["input_ids"][0] # First 50 tokens from batch
-                        # Print proportion of masked tokens in sample_input_ids
-                        num_masked_in_sample = (sample_input_ids == tokenizer.token_to_id("[MASK]")).sum().item()
-                        accelerator.print(f"{C.GREEN}Sample input has {num_masked_in_sample}/{len(sample_input_ids)} masked tokens ({num_masked_in_sample/len(sample_input_ids):.1%}){C.RESET}")
-                        # Print number of unknown tokens in sample_input_ids
-                        num_unk_in_sample = (sample_input_ids == tokenizer.token_to_id("[UNK]")).sum().item()
-                        # Print labels for sample_input_ids
-                        # sample_labels = batch["labels"][0]  # Labels for the first sequence in the batch
-                        # accelerator.print(f"{C.CYAN}Sample labels: {sample_labels}{C.RESET}")
-                        accelerator.print(f"{C.GREEN}Sample input has {num_unk_in_sample}/{len(sample_input_ids)} unknown tokens ({num_unk_in_sample/len(sample_input_ids):.1%}){C.RESET}")
-                        # sample_input_tokens = [tokenizer.id_to_token(int(token_id)) for token_id in sample_input_ids if int(token_id) < tokenizer.get_vocab_size()]
-                        sample_input_tokens = [
-                            tokenizer.id_to_token(int(token_id)) if int(token_id) < tokenizer.get_vocab_size()
-                            else "[UNK]"
-                            for token_id in sample_input_ids
-                        ]
-                        accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens}{C.RESET}")
-                    # loss = outputs.loss
-                    # Ensure all ranks participate in backward/all-reduce: replace non-finite with 0
+                        log_first_batch_info(accelerator, batch, tokenizer, loss, C)
+                    
+                    # Handle non-finite loss
                     if not torch.isfinite(loss):
                         if is_main:
                             print(f"{C.YELLOW}Warning: non-finite loss at step {step} in epoch {epoch+1}. Replacing with 0.{C.RESET}")
                         loss = torch.zeros_like(loss)
                 
-                if step == 0:
-                    accelerator.print(f"{C.YELLOW}About to call accelerator.backward()...{C.RESET}")
+                # Backward pass
                 accelerator.backward(loss)
-                if step == 0:
-                    accelerator.print(f"{C.GREEN}Backward pass completed{C.RESET}")
                 
-                if accelerator.sync_gradients:
-                    # Calculate gradient norm for monitoring
-                    total_norm = 0.0
-                    for param in model.parameters():
-                        if param.grad is not None:
-                            param_norm = param.grad.data.norm(2)
-                            total_norm += param_norm.item() ** 2
-                    total_norm = total_norm ** (1. / 2)
-                    
-                    # Get current learning rate
-                    current_lr = scheduler.get_last_lr()[0]
-                    
-                    # Update monitor with current metrics
-                    monitor.update(float(loss.detach()), total_norm, current_lr, step)
-                    
-                    # Check for training issues
-                    spike_detected, spike_msg = monitor.check_loss_spike()
-                    oscillation_detected, osc_msg = monitor.check_oscillation()
-                    explosion_detected, exp_msg = monitor.check_gradient_explosion(config.get("max_grad_norm", 1.0))
-                    
-                    # Print warnings for issues
-                    if spike_detected and is_main:
-                        print(f"{C.YELLOW}⚠️  {spike_msg}{C.RESET}")
-                    if oscillation_detected and is_main:
-                        print(f"{C.YELLOW}⚠️  {osc_msg}{C.RESET}")
-                    if explosion_detected and is_main:
-                        print(f"{C.RED}🚨 {exp_msg}{C.RESET}")
-                    
-                    if step == 0:
-                        accelerator.print(f"{C.YELLOW}Syncing gradients (skipping clipping for debugging)...{C.RESET}")
-
-                    if (step + 1) % config.get("grad_accum", 8) == 0:
-                        accelerator.clip_grad_norm_(model.parameters(), config.get("max_grad_norm", 1.0))
-                # Only step optimizer/scheduler when we're at an accumulation boundary
-                if accelerator.sync_gradients:
-                    if step == 0:
-                        accelerator.print(f"{C.YELLOW}Stepping optimizer and scheduler...{C.RESET}")
-                    try:
-                        if step == 0:
-                            accelerator.print(f"{C.CYAN}About to step optimizer...{C.RESET}")
-                            # Check for any NaN parameters before optimizer step
-                            has_nan = False
-                            for name, param in model.named_parameters():
-                                if param.grad is not None and torch.isnan(param.grad).any():
-                                    accelerator.print(f"{C.RED}NaN gradient found in {name}{C.RESET}")
-                                    has_nan = True
-                                    break
-                            if has_nan:
-                                accelerator.print(f"{C.RED}Skipping optimizer step due to NaN gradients{C.RESET}")
-                                optimizer.zero_grad()
-                                continue
-                        optimizer.step()
-                        if step == 0:
-                            accelerator.print(f"{C.CYAN}Optimizer step completed, about to step scheduler...{C.RESET}")
-                        scheduler.step()
-                        if step == 0:
-                            accelerator.print(f"{C.CYAN}Scheduler step completed, about to zero gradients...{C.RESET}")
-                        optimizer.zero_grad()
-                        if step == 0:
-                            accelerator.print(f"{C.GREEN}Optimizer step completed{C.RESET}")
-                    except Exception as e:
-                        if step == 0:
-                            accelerator.print(f"{C.RED}Optimizer/scheduler step failed: {e}{C.RESET}")
-                        raise e
+                # Gradient step (includes clipping, monitoring, optimizer step)
+                loss_value = gradient_step(accelerator, model, optimizer, scheduler, monitor, config, step, loss, is_main, C)
                 
-                # Gather and average loss across GPUs
-                if accelerator.sync_gradients:
-                    loss_value = accelerator.gather(loss).mean()
-                else:
-                    loss_value = loss.detach()
-                # Use local loss value only; avoid cross-rank collectives in the hot path
-                # loss_value = float(loss.detach())
+                # Accumulate total loss
                 total_loss += loss_value
 
+                # Update progress bars and logging
                 if step % log_steps == 0:
                     avg_loss = total_loss / (step + 1)
-
                     processed_batches += log_steps
-                    if is_main:
-                        batch_bar.update(log_steps)
-                        loss_bar.update(1)
-                        
-                        # Add monitoring stats to loss bar
-                        monitor_stats = monitor.get_stats()
-                        loss_bar.set_postfix({
-                            "loss": f"{loss_value:.4f}",
-                            "avg_loss": f"{avg_loss:.4f}",
-                            "monitor": f"S:{monitor.spike_count} O:{monitor.oscillation_count} E:{monitor.explosion_count}"
-                        })
-                        
-                        # Print detailed monitor stats every 50 steps
-                        if step % (log_steps * 50) == 0:
-                            accelerator.print(f"{C.CYAN}[Monitor] {monitor_stats}{C.RESET}")
-                        
-                        elapsed = time.time() - epoch_start
-                        batches_per_sec = processed_batches / elapsed if elapsed > 0 else 0
-                        remaining = max(total_batches - processed_batches, 0)
-                        eta_sec = remaining / batches_per_sec if batches_per_sec > 0 else 0
-                        eta_str = str(datetime.timedelta(seconds=int(eta_sec)))
-                        batch_bar.set_postfix({
-                            "batch/s": f"{batches_per_sec:.0f}",
-                            "ETA": eta_str,
-                        })
-                if step % save_steps == 0 and step > 0:
-                    # Save the model state and optimizer only on the main process
-                    if is_main:
-                        try:
-                            print(f"{C.CYAN}[Checkpoint] Starting save at step {step}...{C.RESET}")
-                            print(f"{C.CYAN}[Checkpoint] accelerator.save_state to {checkpoint_path}{C.RESET}")
-                            accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
-                            print(f"{C.CYAN}[Checkpoint] accelerator.save_model to {checkpoint_path}{C.RESET}")
-                            accelerator.save_model(model, checkpoint_path)
-                            unwrapped = accelerator.unwrap_model(model)
-                            print(f"{C.CYAN}[Checkpoint] Saving model the official HuggingFace way...{C.RESET}")
-                            # Use the official saving method
-                            save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
-                            print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer at step {step}{C.RESET}")
-                        except Exception as e:
-                            print(f"{C.YELLOW}[Checkpoint] Warning: failed to save at step {step}: {e}{C.RESET}")
-                            import traceback
-                            traceback.print_exc()
+                    update_progress_bars(batch_bar, loss_bar, monitor, loss_value, avg_loss, step, 
+                                       log_steps, processed_batches, epoch_start, total_batches, is_main)
+                
+                # Save checkpoint
+                save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C)
         
         batch_bar.close()
         loss_bar.close()
@@ -475,17 +242,51 @@ def train_loop(
                 val_batch["attention_mask"] = (val_batch["attention_mask"] == 0)
                 val_target_ids = val_batch["labels"].t()
                 val_outputs = model(
-                    val_batch["input_ids"].t(),
-                    val_batch["attention_mask"],
-                    val_target_ids,
+                    input_ids=val_batch["input_ids"].t(),
+                    attention_mask=val_batch["attention_mask"],
+                    labels=val_target_ids,
                 )
-                val_target_ids = val_target_ids.flatten()
-                val_target_ids = val_target_ids[val_target_ids != -100]
-                val_loss = F.cross_entropy(val_outputs[0], val_target_ids)
+                # Extract loss from model output
+                val_loss = val_outputs.loss
                 total_val_loss += float(val_loss.detach())
                 seen += 1
             if seen > 0:
                 print(f"{C.CYAN}[End-epoch] step {step}: avg_val_loss={total_val_loss/seen:.4f} over {seen} batches{C.RESET}")
+
+            blimp_epoch = 10
+            if epoch % blimp_epoch == 0 and epoch > 0:
+                # Run lm_eval on BLiMP (main process only)
+                import lm_eval
+                from lm_eval import evaluator, tasks
+                from lm_eval.api.model import LM
+                class HuggingFaceLM(LM):
+                    def __init__(self, model, tokenizer):
+                        self.model = model
+                        self.tokenizer = tokenizer
+                        self.batch_size = 1  # Adjust based on memory constraints
+
+                    def loglikelihood(self, requests):
+                        results = []
+                        for request in requests:
+                            inputs = self.tokenizer(request.text, return_tensors="pt").to(accelerator.device)
+                            with torch.no_grad():
+                                outputs = self.model(**inputs, labels=inputs["input_ids"])
+                                log_likelihood = -outputs.loss.item() * inputs["input_ids"].size(1)
+                            results.append((log_likelihood, None))
+                        return results
+
+                    def greedy_until(self, requests):
+                        raise NotImplementedError("Greedy decoding not implemented")
+
+                print(f"{C.MAGENTA}Running BLiMP evaluation...{C.RESET}")
+                lm = HuggingFaceLM(model, tokenizer)
+                results = evaluator.evaluate(lm, tasks.get_task_dict("blimp"), num_fewshot=0)
+                print(f"{C.GREEN}BLiMP evaluation results: {results}{C.RESET}")
+                # Save BLiMP results to a JSON file in the checkpoint directory
+                blimp_results_path = os.path.join(checkpoint_path, f"blimp_results_epoch_{epoch+1}.json")
+                with open(blimp_results_path, "w") as f:
+                    json.dump(results, f, indent=4)
+                print(f"{C.GREEN}BLiMP results saved to {blimp_results_path}{C.RESET}")
                 
         # Print epoch monitoring summary
         if is_main:
@@ -661,20 +462,6 @@ def main():
         print(f"{C.CYAN}Approx. model size:   {total_mb:.2f} MB{C.RESET}", flush=True)
         print(f"{C.BOLD}{C.CYAN}=========================={C.RESET}", flush=True)
         # —––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-    
-    # Scheduler with auto warmup fraction if not provided
-    # total_steps = config["num_epochs"] * len(train_loader)
-    # warmup_cfg = int(config.get("warmup_steps_proportion", 0))
-    # # warmup_steps = warmup_cfg if warmup_cfg > 0 else max(1, int(0.06 * total_steps))
-    # if accelerator.is_main_process and warmup_cfg <= 0:
-    #     print(f"{C.BLUE}Using warmup_steps_proportion={warmup_cfg}% of {total_steps} steps{C.RESET}")
-
-    # scheduler = get_scheduler(
-    #     "cosine",
-    #     optimizer=optimizer,
-    #     num_warmup_steps=warmup_cfg*total_steps,
-    #     num_training_steps=total_steps,
-    # )
 
     # Ensure the scheduler is part of the checkpoint state
     accelerator.register_for_checkpointing(scheduler)

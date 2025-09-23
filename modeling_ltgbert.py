@@ -24,7 +24,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils import checkpoint
 
-from .configuration_ltgbert import LtgBertConfig
+# Handle both relative and absolute imports
+try:
+    from .configuration_ltgbert import LtgBertConfig
+except ImportError:
+    from configuration_ltgbert import LtgBertConfig
 from transformers.modeling_utils import PreTrainedModel
 from transformers.activations import gelu_new
 from transformers.modeling_outputs import (
