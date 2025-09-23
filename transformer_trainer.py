@@ -1,15 +1,14 @@
 import os
+import subprocess
 import sys
 import torch
 import json
 import math
 from torch.utils.data import Dataset
-from transformers import GPT2LMHeadModel, GPT2Config, AutoTokenizer, get_scheduler
-from transformers import BertForMaskedLM, BertConfig as TransformersBertConfig, AutoTokenizer, get_scheduler
+from transformers import BertConfig
 from torch.optim import AdamW
 from tqdm import tqdm
 from accelerate import Accelerator, DataLoaderConfiguration
-from accelerate.local_sgd import LocalSGD
 # from iter_data_loader import iter_data_loader
 from data_loader import data_loader
 import argparse
@@ -32,8 +31,14 @@ from lamb import Lamb
 
 import torch.nn.functional as F
 from training_utils import (
-    log_first_batch_info, forward_pass, gradient_step, 
-    update_progress_bars, save_checkpoint
+    log_first_batch_info, 
+    forward_pass, 
+    gradient_step, 
+    update_progress_bars, 
+    save_checkpoint,
+    load_training_state,
+    save_epoch_checkpoint,
+    generate_special_tokens_map
 )
 
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
@@ -61,30 +66,17 @@ class EmptyDataset(Dataset):
     def __getitem__(self, idx): 
         raise IndexError
 
-def save_model_official_way(model, model_config, tokenizer, checkpoint_path):
-    """
-    Save model the official HuggingFace way for compatibility with lm_eval and other tools.
-    """
-    print(f"{C.CYAN}Saving model the official HuggingFace way to {checkpoint_path}{C.RESET}")
-    
-    # Ensure directory exists
-    os.makedirs(checkpoint_path, exist_ok=True)
-    
-    # Register for auto class - this is the key part!
-    model_config.register_for_auto_class()
-    model.register_for_auto_class()  # No arguments needed for models
-    
-    # Save model and config using HF methods
-    # Use safe_serialization=False to handle shared tensors
-    model.save_pretrained(checkpoint_path, safe_serialization=False)
-    model_config.save_pretrained(checkpoint_path)
-    
-    print(f"{C.BOLD}{C.GREEN}Model saved the official HuggingFace way! Ready for lm_eval with trust_remote_code=True{C.RESET}")
-
 # @torch.compile
-def build_model(checkpoint_path, config_file):
-    # Use the proper config saving function from save_config.py
-    save_ltg_bert_config("./configs/config.json", checkpoint_path)
+def build_model(checkpoint_path, config_file, accelerator=None):
+    # Only save config from main process to avoid race conditions
+    if accelerator is None or accelerator.is_main_process:
+        # Use the proper config saving function from save_config.py
+        save_ltg_bert_config("./configs/config.json", checkpoint_path)
+        print(f"{C.CYAN}Configuration saved to {checkpoint_path}/config.json{C.RESET}")
+    
+    # Wait for main process to finish saving config
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
     
     # Load the saved config
     transformers_config = LtgBertConfig.from_pretrained(checkpoint_path)
@@ -92,15 +84,20 @@ def build_model(checkpoint_path, config_file):
     
     model = LtgBertForMaskedLM(transformers_config)
 
-    # Copy source files with proper naming convention
-    model_type = transformers_config.model_type
-    # copy modeling_ltgbert.py and configuration_ltgbert.py to the checkpoint directory
-    shutil.copy2("modeling_ltgbert.py", checkpoint_path)
-    shutil.copy2("configuration_ltgbert.py", checkpoint_path)
-    # copy config_file to the checkpoint directory using same name
-    shutil.copy2(config_file, checkpoint_path)
-
-    print(f"{C.GREEN}Model initialized and saved to {checkpoint_path}{C.RESET}")
+    # Only copy files from main process to avoid race conditions
+    if accelerator is None or accelerator.is_main_process:
+        # Copy source files with proper naming convention
+        model_type = transformers_config.model_type
+        # copy modeling_ltgbert.py and configuration_ltgbert.py to the checkpoint directory
+        shutil.copy2("modeling_ltgbert.py", checkpoint_path)
+        shutil.copy2("configuration_ltgbert.py", checkpoint_path)
+        # copy config_file to the checkpoint directory using same name
+        shutil.copy2(config_file, checkpoint_path)
+        print(f"{C.GREEN}Model initialized and saved to {checkpoint_path}{C.RESET}")
+    
+    # Wait for main process to finish copying files
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
     return model
 
@@ -119,6 +116,7 @@ def train_loop(
     config,
     checkpoint_path,
     start_epoch,
+    start_step=0,
 ):
     # Initialize training monitor with config values
     monitoring_config = config.get("monitoring", {})
@@ -133,8 +131,14 @@ def train_loop(
     os.makedirs(checkpoint_path, exist_ok=True)  # Ensure directory exists
     tokenizer_dest = os.path.join(checkpoint_path, "tokenizer.json")
     tokenizer.save(tokenizer_dest)
+    
+    # Auto-generate special_tokens_map.json for AutoTokenizer compatibility using refactored utility
+    generate_special_tokens_map(tokenizer, checkpoint_path, accelerator, C)
+    
+    # Wait for main process to finish saving tokenizer files
+    accelerator.wait_for_everyone()
     # Use accelerator.print to avoid N prints across ranks
-    accelerator.print(f"{C.BOLD}{C.CYAN}Starting training loop from epoch {start_epoch} with config: {config}{C.RESET}")
+    accelerator.print(f"{C.BOLD}{C.CYAN}Starting training loop from epoch {start_epoch}, step {start_step} with config: {config}{C.RESET}")
     num_epochs = config["num_epochs"]
     if start_epoch >= num_epochs:
         accelerator.print(f"{C.GREEN}Training already completed. Exiting.{C.RESET}")
@@ -142,18 +146,32 @@ def train_loop(
 
     # 1) Compute number of steps and total tokens for ETA
     steps_per_epoch = len(train_loader)
-    save_steps = max(1, steps_per_epoch // 5)
+    save_steps = max(1, steps_per_epoch // 2)
     print(f"{C.BLUE}Total steps per epoch: {steps_per_epoch}, save every {save_steps} steps{C.RESET}")
+    if start_step > 0:
+        print(f"{C.CYAN}Resuming from step {start_step} within epoch {start_epoch+1}{C.RESET}")
     # val_log_steps = max(1, steps_per_epoch // 200)
     # print(f"{C.BLUE}Validation every {val_log_steps} steps{C.RESET}")
 
     for epoch in range(start_epoch, num_epochs):
-        print(f"{C.BOLD}{C.MAGENTA}Starting epoch {epoch+1}/{num_epochs}{C.RESET}")
+        print(f"\n{C.BOLD}{C.MAGENTA}={'='*60}{C.RESET}")
+        print(f"{C.BOLD}{C.MAGENTA}Starting epoch {epoch+1}/{num_epochs} (0-indexed: epoch {epoch}){C.RESET}")
+        print(f"{C.BOLD}{C.MAGENTA}={'='*60}{C.RESET}")
         model.train()
         total_loss = 0.0
         processed_batches = 0
         epoch_start = time.time()
         log_steps = 1
+        
+        # Reset start_step after the first resumed epoch
+        current_start_step = start_step if epoch == start_epoch else 0
+        
+        if epoch > start_epoch:
+            print(f"{C.GREEN}✓ Successfully progressed to next epoch: {epoch+1}{C.RESET}")
+        elif current_start_step > 0:
+            print(f"{C.YELLOW}Resuming training in epoch {epoch+1} from step {current_start_step}{C.RESET}")
+        else:
+            print(f"{C.CYAN}Starting fresh epoch {epoch+1}{C.RESET}")
     
         # DEBUG
         # train_loader = val_loader
@@ -166,29 +184,104 @@ def train_loop(
             total=total_batches,
             unit="batches",
             unit_scale=True,
-            desc=f"Epoch {epoch+1}/{num_epochs}",
-            leave=False,
+            desc=f"Epoch {epoch+1}/{num_epochs} [Batches]",
+            leave=True,  # Keep the bar visible after completion
             position=0,
             disable=not is_main,
         )
         # Loss bar (steps)
         loss_bar = tqdm(
             total=steps_per_epoch,
-            desc="Loss",
-            leave=False,
+            desc=f"Epoch {epoch+1} [Loss]",
+            leave=True,  # Keep the bar visible after completion
             position=1,
             bar_format="{l_bar}{bar}| {postfix}",
             disable=not is_main,
         )
 
-        for step, batch in enumerate(train_loader):
+        # Handle step resumption efficiently
+        if epoch == start_epoch and current_start_step > 0:
+            print(f"{C.YELLOW}Skipping {current_start_step} batches to resume from step {current_start_step}...{C.RESET}")
+            print(f"{C.CYAN}Dataloader has {len(train_loader)} total batches{C.RESET}")
+            
+            # Validate that we can actually skip to this step
+            if current_start_step >= len(train_loader):
+                print(f"{C.RED}Error: Cannot skip to step {current_start_step}, dataloader only has {len(train_loader)} batches{C.RESET}")
+                print(f"{C.YELLOW}This suggests the checkpoint is invalid or from a different dataset configuration{C.RESET}")
+                # Reset to start from beginning of this epoch
+                current_start_step = 0
+                print(f"{C.CYAN}Falling back to starting from step 0 in epoch {epoch+1}{C.RESET}")
+            
+            if current_start_step > 0:  # Only skip if we still need to
+                # Update progress bars to show skipped progress
+                if is_main:
+                    batch_bar.update(current_start_step)
+                    loss_bar.update(current_start_step // log_steps)
+                    loss_bar.set_postfix({"status": f"skipped to step {current_start_step}"})
+                
+                # Efficient iterator-based skipping using islice
+                train_loader_iter = iter(train_loader)
+                
+                if is_main:
+                    print(f"{C.CYAN}Skipping {current_start_step} batches using efficient islice...{C.RESET}")
+                
+                # Use islice to skip all batches at once - much faster than calling next() in a loop
+                import itertools
+                try:
+                    # Consume (skip) the first current_start_step items without storing them
+                    consumed = itertools.islice(train_loader_iter, current_start_step)
+                    # Force consumption by converting to list and counting
+                    skip_count = sum(1 for _ in consumed)
+                    
+                    if is_main:
+                        print(f"{C.GREEN}Efficient skip completed: {skip_count} batches{C.RESET}")
+                        
+                except StopIteration:
+                    if is_main:
+                        print(f"{C.YELLOW}Iterator exhausted at skip_count={skip_count}. Using what we have.{C.RESET}")
+                
+                batch_iterator = enumerate(train_loader_iter, start=skip_count)
+                
+                # Add debug info about remaining batches (main process only)
+                if is_main:
+                    remaining_batches = len(train_loader) - skip_count
+                    print(f"{C.CYAN}Skipped to position: {skip_count} (target was {current_start_step}){C.RESET}")
+                    print(f"{C.CYAN}Will process {remaining_batches} remaining batches in this epoch{C.RESET}")
+                    print(f"{C.GREEN}Skip completed, resuming training...{C.RESET}")
+                
+            else:
+                # No skipping needed - start from beginning
+                batch_iterator = enumerate(train_loader)
+                if is_main:
+                    print(f"{C.CYAN}Processing all {len(train_loader)} batches normally (no skipping){C.RESET}")
+        else:
+            # Not the resumption epoch, use normal iteration
+            batch_iterator = enumerate(train_loader)
+            
+        # Main training loop - works for both resumed and normal cases
+        batch_count = 0
+        for step, batch in batch_iterator:
+            batch_count += 1
+            
+            # Calculate the correct global step - simple for iterator-based skipping
+            global_step = step
+            
+            # Debug logging for resumed training (main process only)
+            if epoch == start_epoch and current_start_step > 0 and is_main:
+                if step == current_start_step:  # First batch after skipping
+                    print(f"{C.GREEN}Processing first resumed batch at step {step}{C.RESET}")
+                elif batch_count == 10:
+                    print(f"{C.BLUE}Training progressing normally, processed {batch_count} batches (step {step}){C.RESET}")
+                elif batch_count % 500 == 0:
+                    print(f"{C.BLUE}Progress check: processed {batch_count} batches, step {step}{C.RESET}")
+            
             with accelerator.accumulate(model):
                 with accelerator.autocast():
                     # Forward pass
                     loss = forward_pass(model, batch)
                     
                     # Log first batch details for debugging
-                    if step == 0:
+                    if step == current_start_step and epoch == start_epoch:  # First resumed batch
                         log_first_batch_info(accelerator, batch, tokenizer, loss, C)
                     
                     # Handle non-finite loss
@@ -208,85 +301,42 @@ def train_loop(
 
                 # Update progress bars and logging
                 if step % log_steps == 0:
-                    avg_loss = total_loss / (step + 1)
+                    # Simple average loss calculation
+                    avg_loss = total_loss / batch_count if batch_count > 0 else 0.0
+                    
                     processed_batches += log_steps
                     update_progress_bars(batch_bar, loss_bar, monitor, loss_value, avg_loss, step, 
                                        log_steps, processed_batches, epoch_start, total_batches, is_main)
                 
                 # Save checkpoint
-                save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C)
+                save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C, epoch)
         
         batch_bar.close()
         loss_bar.close()
 
+        print(f"\n{C.GREEN}✓ Completed epoch {epoch+1}/{num_epochs}{C.RESET}")
+        print(f"{C.CYAN}Total batches processed: {total_batches}{C.RESET}")
+        
         # End‑of‑epoch checkpoint (main-only, with barriers)
         # accelerator.wait_for_everyone()
         # if accelerator.is_main_process:
-        try:
-            accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
-            unwrapped = accelerator.unwrap_model(model)
-            # Save the model the official HuggingFace way
-            save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
-            print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer{C.RESET}")
-        except Exception as e:
-            print(f"{C.YELLOW}[Checkpoint] Warning: failed to save: {e}{C.RESET}")
+        save_epoch_checkpoint(accelerator, model, tokenizer, checkpoint_path, epoch, is_main, C)
+        
+        print(f"{C.YELLOW}Epoch {epoch+1} checkpoint saved, ready to progress to epoch {epoch+2}{C.RESET}")
+        print(f"{C.DIM}Training state will be saved as: epoch={epoch+1}, step=0{C.RESET}")
         
         # Run validation only on main process with unprepared loader
         model.eval()
         with torch.no_grad():
-            total_val_loss = 0.0
-            seen = 0
             # randomize the validation loader to sample different batches each time
             # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
+            seen = 0
             for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
-                val_batch["attention_mask"] = (val_batch["attention_mask"] == 0)
-                val_target_ids = val_batch["labels"].t()
-                val_outputs = model(
-                    input_ids=val_batch["input_ids"].t(),
-                    attention_mask=val_batch["attention_mask"],
-                    labels=val_target_ids,
-                )
-                # Extract loss from model output
-                val_loss = val_outputs.loss
-                total_val_loss += float(val_loss.detach())
+                val_loss = forward_pass(model, val_batch)
                 seen += 1
-            if seen > 0:
-                print(f"{C.CYAN}[End-epoch] step {step}: avg_val_loss={total_val_loss/seen:.4f} over {seen} batches{C.RESET}")
-
-            blimp_epoch = 10
-            if epoch % blimp_epoch == 0 and epoch > 0:
-                # Run lm_eval on BLiMP (main process only)
-                import lm_eval
-                from lm_eval import evaluator, tasks
-                from lm_eval.api.model import LM
-                class HuggingFaceLM(LM):
-                    def __init__(self, model, tokenizer):
-                        self.model = model
-                        self.tokenizer = tokenizer
-                        self.batch_size = 1  # Adjust based on memory constraints
-
-                    def loglikelihood(self, requests):
-                        results = []
-                        for request in requests:
-                            inputs = self.tokenizer(request.text, return_tensors="pt").to(accelerator.device)
-                            with torch.no_grad():
-                                outputs = self.model(**inputs, labels=inputs["input_ids"])
-                                log_likelihood = -outputs.loss.item() * inputs["input_ids"].size(1)
-                            results.append((log_likelihood, None))
-                        return results
-
-                    def greedy_until(self, requests):
-                        raise NotImplementedError("Greedy decoding not implemented")
-
-                print(f"{C.MAGENTA}Running BLiMP evaluation...{C.RESET}")
-                lm = HuggingFaceLM(model, tokenizer)
-                results = evaluator.evaluate(lm, tasks.get_task_dict("blimp"), num_fewshot=0)
-                print(f"{C.GREEN}BLiMP evaluation results: {results}{C.RESET}")
-                # Save BLiMP results to a JSON file in the checkpoint directory
-                blimp_results_path = os.path.join(checkpoint_path, f"blimp_results_epoch_{epoch+1}.json")
-                with open(blimp_results_path, "w") as f:
-                    json.dump(results, f, indent=4)
-                print(f"{C.GREEN}BLiMP results saved to {blimp_results_path}{C.RESET}")
+            val_loss = accelerator.gather(val_loss).mean()
+            if is_main:
+                print(f"{C.CYAN}[End-epoch] epoch {epoch+1}: avg_val_loss={val_loss:.4f} over {seen} batches{C.RESET}")
                 
         # Print epoch monitoring summary
         if is_main:
@@ -341,7 +391,7 @@ def main():
     train_loader, val_loader, test_loader, collate_fn, total_tokens_train = data_loader(config, tokenizer, config["cache_path"])
     print(f"{C.GREEN}Data loaders created successfully{C.RESET}")
     # Build the GPT-2 model from scratch based on our config
-    model = build_model(checkpoint_path, args.config_path)
+    model = build_model(checkpoint_path, args.config_path, accelerator)
     
     # # Enable gradient checkpointing for memory efficiency but comes at a speed penalty of 15-20%s
     # if hasattr(model, 'gradient_checkpointing_enable'):
@@ -491,9 +541,27 @@ def main():
     else:
         accelerator.print(f"{C.YELLOW}No checkpoint found at {checkpoint_path}, starting from scratch.{C.RESET}")
 
-    start_epoch = 0
+    # Load the saved epoch and step from training state
+    start_epoch, start_step = load_training_state(checkpoint_path)
+    
+    print(f"\n{C.BOLD}{C.BLUE}=== TRAINING STATE DEBUG ==={C.RESET}")
+    print(f"{C.BLUE}Loaded training state: epoch={start_epoch}, step={start_step}{C.RESET}")
+    print(f"{C.BLUE}Total epochs configured: {config['num_epochs']}{C.RESET}")
+    print(f"{C.BLUE}Will run epochs: {start_epoch} → {config['num_epochs']-1} (range({start_epoch}, {config['num_epochs']}))){C.RESET}")
+    
+    # Interpret the training state correctly:
+    # - If step > 0: we're in the middle of start_epoch, resume from start_step
+    # - If step = 0: we completed start_epoch-1, start fresh at start_epoch
+    if start_step > 0:
+        accelerator.print(f"{C.GREEN}Resuming training in the middle of epoch {start_epoch + 1} at step {start_step}{C.RESET}")
+    elif start_epoch > 0:
+        accelerator.print(f"{C.GREEN}Resuming training at the beginning of epoch {start_epoch + 1} (completed {start_epoch} epochs){C.RESET}")
+    else:
+        accelerator.print(f"{C.CYAN}Starting training from the beginning{C.RESET}")
+    print(f"{C.BOLD}{C.BLUE}==========================={C.RESET}\n")
+    
     # train_loader = test_loader
-    train_loop(accelerator, model, tokenizer, train_loader, val_loader, optimizer, scheduler, config, checkpoint_path, start_epoch)
+    train_loop(accelerator, model, tokenizer, train_loader, val_loader, optimizer, scheduler, config, checkpoint_path, start_epoch, start_step)
 
 
 if __name__ == "__main__":

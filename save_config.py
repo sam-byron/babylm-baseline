@@ -4,7 +4,7 @@ Save a complete LtgBertConfig configuration file
 """
 
 from config import BertConfig
-from ltg_bert_config import LtgBertConfig
+from configuration_ltgbert import LtgBertConfig
 import transformers
 
 def save_ltg_bert_config(custom_config_path, output_path):
@@ -31,9 +31,9 @@ def save_ltg_bert_config(custom_config_path, output_path):
     # Add transformers-specific fields
     transformers_config.architectures = ["LtgBertForMaskedLM", "LtgBertForSequenceClassification"]
     transformers_config.auto_map = {
-        "AutoConfig": "ltg_bert_config.LtgBertConfig",
-        "AutoModelForMaskedLM": "ltg_bert.LtgBertForMaskedLM",
-        "AutoModelForSequenceClassification": "ltg_bert.LtgBertForSequenceClassification"
+        "AutoConfig": "configuration_ltgbert.LtgBertConfig",
+        "AutoModelForMaskedLM": "modeling_ltgbert.LtgBertForMaskedLM",
+        "AutoModelForSequenceClassification": "modeling_ltgbert.LtgBertForSequenceClassification"
     }
     transformers_config.torch_dtype = "float32"
     transformers_config.transformers_version = transformers.__version__

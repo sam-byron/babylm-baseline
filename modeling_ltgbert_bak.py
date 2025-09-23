@@ -300,11 +300,6 @@ class LtgBertPreTrainedModel(PreTrainedModel):
     base_model_prefix = "bnc-bert"
     supports_gradient_checkpointing = True
 
-    def __init__(self, config, *inputs, **kwargs):
-        super().__init__(config, *inputs, **kwargs)
-        # Add tensor parallelism plan attribute - empty list for proper multi-GPU support
-        self._tp_plan = []
-
     def _set_gradient_checkpointing(self, module, value=False):
         if isinstance(module, Encoder):
             module.activation_checkpointing = value
@@ -435,8 +430,6 @@ class LtgBertForMaskedLM(LtgBertModel):
 
     def __init__(self, config):
         super().__init__(config, add_mlm_layer=True)
-        # Add tensor parallelism plan attribute - empty list for proper multi-GPU support
-        self._tp_plan = []
 
     def get_output_embeddings(self):
         return self.classifier.nonlinearity[-1].weight

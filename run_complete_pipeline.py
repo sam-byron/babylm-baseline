@@ -30,8 +30,8 @@ from pathlib import Path
 # Add current directory to path for imports
 sys.path.insert(0, os.getcwd())
 
-from ltg_bert_config import LtgBertConfig
-from ltg_bert import LtgBertForMaskedLM, LtgBertForSequenceClassification
+from configuration_ltgbert import LtgBertConfig
+from modeling_ltgbert import LtgBertForMaskedLM, LtgBertForSequenceClassification
 
 def save_model_official_way(model, config, tokenizer, output_path, model_type="classification"):
     """
@@ -55,16 +55,16 @@ def save_model_official_way(model, config, tokenizer, output_path, model_type="c
     model_name = config.model_type
     dest_modeling = os.path.join(output_path, f"modeling_{model_name}.py")
     dest_config = os.path.join(output_path, f"configuration_{model_name}.py")
-    
-    # Copy ltg_bert.py to modeling_ltg_bert.py
-    if os.path.exists("ltg_bert.py"):
-        shutil.copy2("ltg_bert.py", dest_modeling)
-        print(f"✅ Copied ltg_bert.py -> {dest_modeling}")
-    
-    # Copy ltg_bert_config.py to configuration_ltg_bert.py
-    if os.path.exists("ltg_bert_config.py"):
-        shutil.copy2("ltg_bert_config.py", dest_config)
-        print(f"✅ Copied ltg_bert_config.py -> {dest_config}")
+
+    # Copy modeling_ltgbert.py
+    if os.path.exists("modeling_ltgbert.py"):
+        shutil.copy2("modeling_ltgbert.py", output_path)
+        print(f"✅ Copied modeling_ltgbert.py -> {output_path}")
+
+    # Copy configuration_ltgbert.py
+    if os.path.exists("configuration_ltgbert.py"):
+        shutil.copy2("configuration_ltgbert.py", output_path)
+        print(f"✅ Copied configuration_ltgbert.py -> {output_path}")
     
     # Copy tokenizer files if they exist
     tokenizer_files = ['data/pretrain/wordpiece_vocab.json', 'tokenizer_config.json', 'vocab.txt', 'special_tokens_map.json']

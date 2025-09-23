@@ -6,6 +6,7 @@ Programmatically create all necessary tokenizer files for transformers compatibi
 import json
 import os
 from tokenizer import Tokenizer
+from training_utils import generate_special_tokens_map
 
 def create_tokenizer_files(checkpoint_path, tokenizer_path="./tokenizer.json"):
     """
@@ -51,19 +52,8 @@ def create_tokenizer_files(checkpoint_path, tokenizer_path="./tokenizer.json"):
         json.dump(tokenizer_config, f, indent=2)
     print(f"Created {tokenizer_config_file}")
     
-    # Create special_tokens_map.json
-    special_tokens_map = {
-        "cls_token": "[CLS]",
-        "mask_token": "[MASK]",
-        "pad_token": "[PAD]",
-        "sep_token": "[SEP]",
-        "unk_token": "[UNK]"
-    }
-    
-    special_tokens_file = os.path.join(checkpoint_path, "special_tokens_map.json")
-    with open(special_tokens_file, 'w', encoding='utf-8') as f:
-        json.dump(special_tokens_map, f, indent=2)
-    print(f"Created {special_tokens_file}")
+    # Create special_tokens_map.json using the refactored utility
+    generate_special_tokens_map(tokenizer.tokenizer, checkpoint_path)
     
     # Copy the existing tokenizer.json if it doesn't exist in checkpoint
     tokenizer_json_dest = os.path.join(checkpoint_path, "tokenizer.json")
