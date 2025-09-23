@@ -28,6 +28,8 @@ import shutil
 
 from lamb import Lamb
 
+import torch.nn.functional as F
+
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
 # import os
 # os.environ.setdefault('CUDA_HOME', '/usr/local/cuda-12.9')
@@ -260,13 +262,19 @@ def train_loop(
                     if step == 0:
                         accelerator.print(f"{C.YELLOW}About to run model forward pass...{C.RESET}")
                     # print(f"[Epoch {epoch+1}] Processing batch {step+1}/{total_batches} (size={len(batch)})")
-                    outputs = model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"],
+                    # convert batch["attention_mask"] to bool
+                    batch["attention_mask"] = (batch["attention_mask"] == 0)
+                    target_ids = batch["labels"].t()
+                    prediction = model(
+                        batch["input_ids"].t(),
+                        batch["attention_mask"],
+                        target_ids,
                     )
+                    target_ids = target_ids.flatten()
+                    target_ids = target_ids[target_ids != -100]
+                    loss = F.cross_entropy(prediction[0], target_ids)
                     if step == 0:
-                        accelerator.print(f"{C.GREEN}Model forward pass completed, loss: {outputs.loss}{C.RESET}")
+                        accelerator.print(f"{C.GREEN}Model forward pass completed, loss: {loss}{C.RESET}")
                         # Debug: Check how many tokens are being masked
                         masked_tokens = (batch["labels"] != -100).sum().item()
                         total_tokens = batch["labels"].numel()
@@ -306,7 +314,7 @@ def train_loop(
                             for token_id in sample_input_ids
                         ]
                         accelerator.print(f"{C.CYAN}Sample input tokens: {sample_input_tokens}{C.RESET}")
-                    loss = outputs.loss
+                    # loss = outputs.loss
                     # Ensure all ranks participate in backward/all-reduce: replace non-finite with 0
                     if not torch.isfinite(loss):
                         if is_main:
@@ -464,12 +472,17 @@ def train_loop(
             # randomize the validation loader to sample different batches each time
             # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
             for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
+                val_batch["attention_mask"] = (val_batch["attention_mask"] == 0)
+                val_target_ids = val_batch["labels"].t()
                 val_outputs = model(
-                    input_ids=val_batch["input_ids"],
-                    attention_mask=val_batch["attention_mask"],
-                    labels=val_batch["labels"],
+                    val_batch["input_ids"].t(),
+                    val_batch["attention_mask"],
+                    val_target_ids,
                 )
-                total_val_loss += float(val_outputs.loss.detach())
+                val_target_ids = val_target_ids.flatten()
+                val_target_ids = val_target_ids[val_target_ids != -100]
+                val_loss = F.cross_entropy(val_outputs[0], val_target_ids)
+                total_val_loss += float(val_loss.detach())
                 seen += 1
             if seen > 0:
                 print(f"{C.CYAN}[End-epoch] step {step}: avg_val_loss={total_val_loss/seen:.4f} over {seen} batches{C.RESET}")

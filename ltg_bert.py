@@ -33,92 +33,21 @@ class LtgBertForMaskedLM(PreTrainedModel):
         # Initialize weights
         self.post_init()
 
-    def _init_weights(self, module):
-        """Initialize the weights"""
-        if isinstance(module, nn.Linear):
-            # Initialize linear layers with truncated normal distribution
-            std = math.sqrt(2.0 / (5.0 * module.in_features))
-            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            # Initialize embedding layers with truncated normal distribution
-            std = math.sqrt(2.0 / (5.0 * module.embedding_dim))
-            nn.init.trunc_normal_(module.weight, mean=0.0, std=std, a=-2*std, b=2*std)
-        elif isinstance(module, nn.LayerNorm):
-            # LayerNorm layers are already initialized correctly by PyTorch
-            pass
-        elif isinstance(module, nn.Parameter):
-            # Initialize parameter tensors (like relative embeddings)
-            std = math.sqrt(2.0 / (5.0 * module.size(-1)))
-            nn.init.trunc_normal_(module, mean=0.0, std=std, a=-2*std, b=2*std)
-
     def get_contextualized(self, input_ids, attention_mask):
-        # Transpose input_ids from [batch_size, seq_len] to [seq_len, batch_size]
-        input_ids = input_ids.transpose(0, 1)
         static_embeddings, relative_embedding = self.embedding(input_ids)
-        # attention_mask should be [batch_size, 1, 1, seq_len] for broadcasting
-        # Convert from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
-        if attention_mask.dim() == 2:
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
-        contextualized_embeddings = self.transformer(static_embeddings, attention_mask, relative_embedding)
+        contextualized_embeddings = self.transformer(static_embeddings, attention_mask.unsqueeze(1).unsqueeze(2), relative_embedding)
         return contextualized_embeddings
 
-    def forward(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        """
-        Forward pass that returns MaskedLMOutput for compatibility with transformers
-        """
+    def forward(self, input_ids, attention_mask, masked_lm_labels=None):
         contextualized_embeddings = self.get_contextualized(input_ids, attention_mask)[-1]
-        # Transpose back from [seq_len, batch_size, hidden_size] to [batch_size, seq_len, hidden_size]
-        contextualized_embeddings = contextualized_embeddings.transpose(0, 1)
-        
-        # Get predictions from classifier
-        prediction_scores = self.classifier(contextualized_embeddings, labels)
-        
-        loss = None
-        if labels is not None:
-            # Compute MLM loss
-            active_loss = labels.view(-1) != -100
-            num_active = active_loss.sum().item()
-            if active_loss.any():
-                active_labels = labels.view(-1)[active_loss]
-                # prediction_scores already contains only predictions for masked tokens
-                loss = F.cross_entropy(prediction_scores, active_labels)
-                
-                # Debug: Print loss computation details for first batch
-                if hasattr(self, '_debug_step_count'):
-                    self._debug_step_count += 1
-                else:
-                    self._debug_step_count = 1
-                    
-                if self._debug_step_count == 1:
-                    print(f"Loss computation debug:")
-                    print(f"  - Active tokens: {num_active}")
-                    print(f"  - Prediction scores shape: {prediction_scores.shape}")
-                    print(f"  - Active labels shape: {active_labels.shape}")
-                    print(f"  - Active labels min/max: {active_labels.min().item()}/{active_labels.max().item()}")
-                    print(f"  - Cross entropy loss: {loss.item()}")
-            else:
-                loss = torch.tensor(0.0, device=input_ids.device, requires_grad=True)
-        
-        return MaskedLMOutput(
-            loss=loss,
-            logits=prediction_scores,
-            hidden_states=None,
-            attentions=None,
-        )
+        subword_prediction = self.classifier(contextualized_embeddings, masked_lm_labels)
 
-    def get_input_embeddings(self):
-        return self.embedding.word_embedding
+        if self.next_sentence_classifier:
+            next_sentence_prediction = self.next_sentence_classifier(contextualized_embeddings)
+        else:
+            next_sentence_prediction = None
 
-    def set_input_embeddings(self, value):
-        self.embedding.word_embedding = value
-
-    def get_output_embeddings(self):
-        return self.classifier.nonlinearity[-1]
-
-    def set_output_embeddings(self, new_embeddings):
-        self.classifier.nonlinearity[-1] = new_embeddings
+        return subword_prediction, next_sentence_prediction
 
     def register_for_auto_class(self):
         from transformers import AutoConfig, AutoModelForMaskedLM
@@ -243,50 +172,25 @@ class LtgBertForSequenceClassification(PreTrainedModel):
 class Encoder(nn.Module):
     def __init__(self, config, activation_checkpointing=False):
         super().__init__()
-        
-        self.config = config
-        self.activation_checkpointing = activation_checkpointing
-        
-        if config.share_layer_weights:
-            # ALBERT-style parameter sharing: create only one layer and reuse it
-            self.shared_layer = EncoderLayer(config)
-            self.layers = nn.ModuleList([self.shared_layer for _ in range(config.num_hidden_layers)])
-            print(f"🔄 ALBERT-style parameter sharing enabled: {config.num_hidden_layers} layers sharing weights")
-        else:
-            # Standard approach: each layer has its own parameters
-            self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
-        # Apply layer-wise scaling only for non-shared layers
-        if not config.share_layer_weights:
-            for i, layer in enumerate(self.layers):
-                layer.mlp.mlp[1].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
-                layer.mlp.mlp[-2].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
+        for i, layer in enumerate(self.layers):
+            layer.mlp.mlp[1].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
+            layer.mlp.mlp[-2].weight.data *= math.sqrt(1.0 / (2.0 * (1 + i)))
+
+        self.activation_checkpointing = activation_checkpointing
     
     def forward(self, hidden_states, attention_mask, relative_embedding):
         hidden_states = [hidden_states]
-        
-        if self.config.share_layer_weights:
-            # ALBERT-style: use the same layer multiple times
-            for _ in range(self.config.num_hidden_layers):
-                if self.activation_checkpointing:
-                    hidden_states.append(
-                        checkpoint.checkpoint(self.shared_layer, hidden_states[-1], attention_mask, relative_embedding)
-                    )
-                else:
-                    hidden_states.append(
-                        self.shared_layer(hidden_states[-1], attention_mask, relative_embedding)
-                    )
-        else:
-            # Standard: use different layers
-            for layer in self.layers:
-                if self.activation_checkpointing:
-                    hidden_states.append(
-                        checkpoint.checkpoint(layer, hidden_states[-1], attention_mask, relative_embedding)
-                    )
-                else:
-                    hidden_states.append(
-                        layer(hidden_states[-1], attention_mask, relative_embedding)
-                    )
+        for layer in self.layers:
+            if self.activation_checkpointing:
+                hidden_states.append(
+                    checkpoint.checkpoint(layer, hidden_states[-1], attention_mask, relative_embedding)
+                )
+            else:
+                hidden_states.append(
+                    layer(hidden_states[-1], attention_mask, relative_embedding)
+                )
 
         return hidden_states
 
@@ -386,37 +290,27 @@ class FeedForward(nn.Module):
 
 class MaskedSoftmax(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, mask, dim):
-        # Store dim for backward
-        ctx.dim = dim
-        # Convert mask to boolean if it's not already
-        # Assuming mask is 1 for valid positions, 0 for padding
-        # We need to invert it: True for positions to mask (padding)
+    def forward(self, x, mask, dim):
+        self.dim = dim
         if mask.dtype != torch.bool:
             mask = (mask == 0)  # Convert 0s (padding) to True (mask these positions)
-        
-        # Ensure mask can broadcast to x's shape
-        # x shape: [batch_size, num_heads, seq_len, seq_len]
-        # mask shape should be: [batch_size, 1, 1, seq_len] or broadcastable
-        mask = mask.expand_as(x)
-        
-        # Use in-place operations more carefully for distributed training
-        x_masked = x.masked_fill(mask, float('-inf'))
-        result = torch.softmax(x_masked, ctx.dim)
-        result = result.masked_fill(mask, 0.0)
-        
-        # Save for backward - be more careful about what we save
-        ctx.save_for_backward(result, mask)
-        return result
+        if mask.shape[0] != x.shape[0] and mask.shape[-1] == x.shape[0]:
+            # Transpose from [seq_len, 1, 1, batch_size] to [batch_size, 1, 1, seq_len]
+            mask = mask.permute(3, 1, 2, 0)
+            # Now ensure mask can be expanded to match x's shape
+            # mask should now be [batch_size, 1, 1, seq_len]
+            mask = mask.expand_as(x)
+        x.masked_fill_(mask, float('-inf'))
+        x = torch.softmax(x, self.dim)
+        x.masked_fill_(mask, 0.0)
+        self.save_for_backward(x)
+        return x
 
     @staticmethod
-    def backward(ctx, grad_output):
-        result, mask = ctx.saved_tensors
-        # Use the standard softmax backward implementation
-        grad_input = _softmax_backward_data(grad_output, result, ctx.dim, result.dtype)
-        # Zero out gradients for masked positions
-        grad_input = grad_input.masked_fill(mask, 0.0)
-        return grad_input, None, None
+    def backward(self, grad_output):
+        output, = self.saved_tensors
+        inputGrad = _softmax_backward_data(grad_output, output, self.dim, output.dtype)
+        return inputGrad, None, None
 
 
 class Attention(nn.Module):
