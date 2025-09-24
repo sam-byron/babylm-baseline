@@ -47,7 +47,24 @@ class DynamicMaskingCollator:
         ])
         
         # Initialize the masking strategy - REUSE existing implementation!
-        n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
+        # Extend protection to new structural tokens if they form a contiguous prefix
+        structural_tokens = [
+            "[PAD]","[UNK]","[CLS]","[SEP]","[MASK]",
+            "[PAR]","[TAB]","[DOC]","[EOD]","[SPK]"
+        ]
+        special_ids = []
+        for tok in structural_tokens:
+            tid = tokenizer.token_to_id(tok)
+            if tid is not None:
+                special_ids.append(tid)
+        special_ids = sorted(set(special_ids))
+        if special_ids and special_ids == list(range(len(special_ids))):
+            n_special_tokens = len(special_ids)
+        else:
+            # Fallback: assume original 6 (legacy) to avoid over-excluding normal vocab tokens
+            n_special_tokens = 6
+            if special_ids:
+                print(f"[DynamicCollator] Warning: structural special token IDs not contiguous from 0. Using legacy n_special_tokens=6. IDs={special_ids}")
         
         masking_strategies = {
             "span": SpanMaskingStrategy,
@@ -80,8 +97,7 @@ class DynamicMaskingCollator:
                 keep_p=keep_probability,
                 # seq_length=self.seq_length,
             )
-        
-        print(f"🎭 Dynamic collator using {masking_strategy} masking strategy (reusing mlm_dataset implementation)")
+        print(f"[DynamicCollator] 🎭 Using strategy={self.masking_strategy} n_special_tokens={n_special_tokens} span_max={max_span_length if masking_strategy=='span' else 'N/A'}")
 
     def __call__(self, examples: List[Union[List[int], torch.Tensor, Dict[str, torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # Convert examples to tensors if needed

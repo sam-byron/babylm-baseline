@@ -1,0 +1,63 @@
+{
+  "_comment": "LAMB with per-device batch 128 and grad_accum 28; higher effective batch for faster progress while staying under 32GB",
+  "_source": "Samuel et al., 2023 (arXiv:2303.09859). Large-batch stable LAMB.",
+
+  "block_size": 128,
+  "num_epochs": 225,
+
+  "_batching_notes": "Per-GPU batch_size * grad_accum * world_size = effective sequences per optimizer update",
+  "batch_size": 128,
+  "grad_accum": 28,
+  "_world_size_hint": 3,
+  "_effective_sequences_per_update": 10752,
+  "_effective_tokens_per_update": 1376256,
+
+  "vocab_size": 16384,
+  "dataset_split": "train",
+  "tokenizer_path": "./data/pretrain/wordpiece_vocab.json",
+
+  "optimizer": "lamb",
+  "learning_rate": 0.006,
+  "lr_scale_alpha": 0.5,
+  "peak_lr_cap": 0.011,
+  "min_lr": 1e-5,
+  "warmup_steps_proportion": 0.01,
+  "optimizer_eps": 1e-6,
+  "weight_decay": 0.01,
+  "head_weight_decay": 0.1,
+  "max_grad_norm": 1.0,
+
+  "attention_probs_dropout_prob": 0.1,
+  "hidden_dropout_prob": 0.1,
+
+  "hidden_size": 768,
+  "intermediate_size": 2048,
+  "num_attention_heads": 12,
+  "num_hidden_layers": 12,
+  "position_bucket_size": 32,
+  "layer_norm_eps": 1e-5,
+  "share_layer_weights": false,
+
+  "masking_strategy": "whole_word",
+  "mask_p": 0.15,
+  "random_p": 0.1,
+  "keep_p": 0.1,
+  "max_span_length": 5,
+  "use_dynamic_masking": true,
+
+  "cache_path": "model_babylm_bert_ltg",
+  "chunk_size": 10000,
+
+  "monitoring": {
+    "spike_threshold": 0.6,
+    "oscillation_threshold": 0.3,
+    "window_size": 100
+  },
+
+  "_inference": {
+    "max_new_tokens": 400,
+    "max_response_length": 150,
+    "temperature": 0.9,
+    "top_p": 0.8
+  }
+}

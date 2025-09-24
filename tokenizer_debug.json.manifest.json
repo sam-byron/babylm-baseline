@@ -1,0 +1,33 @@
+{
+  "created_utc": "2025-09-24T08:14:43.557222Z",
+  "vocab_path": "tokenizer_debug.json",
+  "data_dir": "data/pretrain/bnc",
+  "input_path": null,
+  "vocab_size_requested": 16384,
+  "min_frequency": 10,
+  "max_lines": 200000,
+  "shuffle_files": false,
+  "special_tokens": [
+    "\u0120doing",
+    "\u0120amusing",
+    "\u0120Kent",
+    "\u0120nom",
+    "\u0120MacQuillan",
+    "\u0120bike",
+    "\u0120agricultural",
+    "\u0120pupil",
+    "\u0120worrying",
+    "\u0120prol",
+    "\u0120cloud",
+    "\u0120motivation",
+    "\u0120Jerome",
+    "\u0120builders",
+    "\u0120wearing",
+    "\u0120craters",
+    "\u0120Wycliffe",
+    "\u0120regions",
+    "\u0120V",
+    "\u0120awake"
+  ],
+  "sha256": "c8b4936ddbc1b2f4004466c3d1666c916588de44bd6df01ec98336dce3e873e3"
+}

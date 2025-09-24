@@ -1,5 +1,10 @@
 import argparse
 from collections import Counter
+import glob
+import os
+import hashlib
+import json
+from datetime import datetime
 
 from tokenizers.models import WordPiece
 from tokenizers.trainers import WordPieceTrainer
@@ -7,7 +12,11 @@ from tokenizers import Tokenizer, pre_tokenizers, decoders, processors
 
 
 def initialize_tokenizer(args):
-    special_tokens = ["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]", "[PAR]", "[TAB]"]
+    # Extended special tokens (fresh start): added document, end-of-document, speaker markers
+    special_tokens = [
+        "[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]", "[PAR]", "[TAB]",
+        "[DOC]", "[EOD]", "[SPK]"
+    ]
 
     tokenizer = Tokenizer(WordPiece(unk_token="[UNK]"))
     tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
@@ -27,56 +36,125 @@ def initialize_tokenizer(args):
     return tokenizer, trainer
 
 
-def calculate_f95(args, tokenizer, f):
+def calculate_f95(tokenizer, line_iter):
+    """Compute the 95% cumulative frequency threshold token count.
+
+    We build a frequency table of emitted tokens (post-tokenization). This is
+    an expensive pass; it streams the iterator fully.
+    """
     counter = Counter()
-    for sentence in f.readlines():
+    total_lines = 0
+    for sentence in line_iter:
         sentence = sentence.strip()
-        if len(sentence) > 0:
-            counter.update(tokenizer.encode(sentence).tokens)
-
+        if not sentence:
+            continue
+        counter.update(tokenizer.encode(sentence).tokens)
+        total_lines += 1
     sorted_subwords = counter.most_common()
+    print(f"[F95] Processed {total_lines} lines. Unique subwords encountered: {len(sorted_subwords)}")
+    if not sorted_subwords:
+        return 0, []
     print("100 most common subwords:\n" + '\n'.join(str(x) for x in sorted_subwords[:100]) + '\n')
-
-    with open(args.vocab_path + "_freqs", 'w') as f_freq:
-        f_freq.write('\n'.join(f"{subword}: {freq}" for subword, freq in sorted_subwords))
-
     subword95 = sorted_subwords[len(sorted_subwords) * 95 // 100]
-    return subword95[1]
+    return subword95[1], sorted_subwords
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='BERT sharding')
-    parser.add_argument('--input_path', type=str, default="data/pretrain/bnc/train.md", help='Specify the input filename')
+    # Deprecated: --input_path retained for backward compatibility; prefer --data-dir
+    parser.add_argument('--input_path', type=str, default=None, help='(Deprecated) Single input filename; use --data-dir instead')
+    parser.add_argument('--data-dir', type=str, default='data/pretrain/bnc', help='Root directory containing .md files recursively')
     parser.add_argument('--vocab_path', type=str, default="data/pretrain/bpe.json", help='Specify the output filename')
     parser.add_argument('--vocab_size', type=int, default=2**14, help='Number of subwords in the trained tokenizer')
     parser.add_argument('--min_frequency', type=int, default=10, help='Minimal number of occurences of every candidate subword')
+    parser.add_argument('--max-lines', type=int, default=None, help='Optional cap on number of lines for faster experimentation')
+    parser.add_argument('--shuffle-files', action='store_true', help='Shuffle file order before streaming (may impact reproducibility)')
     args = parser.parse_args()
 
     print(f"Initializing a WordPiece tokenizer", flush=True)
     tokenizer, trainer = initialize_tokenizer(args)
 
-    print("Training the tokenizer", flush=True)
-    def iterator(file_path: str):
-        for line in open(file_path):
-            line = line.strip()
-            line = line.replace("[TAB] ", "").strip()
-            if len(line) == 0:
-                continue
-            yield line
+    print("Training the tokenizer (streaming all .md files)", flush=True)
 
-    tokenizer.train_from_iterator(iterator(args.input_path), trainer)
+    def iter_all_md_lines(root_dir: str):
+        pattern = os.path.join(root_dir, '**', '*.md')
+        files = glob.glob(pattern, recursive=True)
+        if not files:
+            raise SystemExit(f"No .md files found under {root_dir}")
+        if args.shuffle_files:
+            import random
+            random.Random(13).shuffle(files)  # deterministic shuffle
+        line_count = 0
+        for fp in files:
+            try:
+                with open(fp, 'r', encoding='utf-8') as fh:
+                    for raw in fh:
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        # Remove explicit [TAB] token markers if present in raw data
+                        line = line.replace('[TAB] ', '').strip()
+                        if not line:
+                            continue
+                        yield line
+                        line_count += 1
+                        if args.max_lines and line_count >= args.max_lines:
+                            return
+            except Exception as e:
+                print(f"[Warn] Failed reading {fp}: {e}")
+
+    # Choose data source: data-dir preferred; fallback to single file if provided and no data-dir
+    data_source_desc = f"directory {args.data_dir}" if args.data_dir else f"file {args.input_path}"
+    print(f"[Data] Streaming from {data_source_desc}")
+    def single_file_iterator(file_path: str):
+        with open(file_path, 'r', encoding='utf-8') as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                yield line.replace('[TAB] ', '').strip()
+    line_iter = iter_all_md_lines(args.data_dir) if args.data_dir else single_file_iterator(args.input_path)
+
+    tokenizer.train_from_iterator(line_iter, trainer)
 
     print("Saving the tokenizer", flush=True)
     tokenizer.save(args.vocab_path)
+
+    # Produce a reproducibility manifest (hash + args + special tokens)
+    try:
+        with open(args.vocab_path, 'rb') as f_tok:
+            tok_bytes = f_tok.read()
+        sha256 = hashlib.sha256(tok_bytes).hexdigest()
+        manifest = {
+            "created_utc": datetime.utcnow().isoformat() + 'Z',
+            "vocab_path": args.vocab_path,
+            "data_dir": args.data_dir,
+            "input_path": args.input_path,
+            "vocab_size_requested": args.vocab_size,
+            "min_frequency": args.min_frequency,
+            "max_lines": args.max_lines,
+            "shuffle_files": args.shuffle_files,
+            "special_tokens": list(tokenizer.get_vocab().keys())[:20],  # preview only
+            "sha256": sha256
+        }
+        with open(args.vocab_path + '.manifest.json', 'w') as f_man:
+            json.dump(manifest, f_man, indent=2)
+        print(f"Wrote manifest {args.vocab_path + '.manifest.json'} (sha256={sha256[:12]}...)")
+    except Exception as e:
+        print(f"Warning: failed to write tokenizer manifest: {e}")
 
     print("TEST")
     print("Trying to load the tokenizer...")
     tokenizer = Tokenizer.from_file(args.vocab_path)
     print("Success!")
 
-    with open(args.input_path) as f:
-        f95 = calculate_f95(args, tokenizer, f)
-    print(f"F_{{95%}} is {f95}\n")
+    # Recompute F95 over the same corpus (may be expensive)
+    print("Computing F95 over corpus (second streaming pass)...", flush=True)
+    f95_value, freq_list = calculate_f95(tokenizer, iter_all_md_lines(args.data_dir))
+    with open(args.vocab_path + '_freqs', 'w') as f_freq:
+        for subword, freq in freq_list:
+            f_freq.write(f"{subword}: {freq}\n")
+    print(f"F_{95}% is {f95_value}\n")
 
     print("Samples from the tokenizer:")
 

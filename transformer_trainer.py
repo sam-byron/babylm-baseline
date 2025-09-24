@@ -471,24 +471,39 @@ def main():
     # --- Gradient clipping: engage earlier to stop "near explosion" warnings ---
     max_grad_norm = float(config.get("max_grad_norm", 1.0))  # ↓ from 1.5
     
-    if config.get("optimizer", "adamw") == "lamb":
-        print(f"{C.BLUE}Using LAMB optimizer with layer-wise weight decay{C.RESET}")
-        low_decay_params = list(model.embedding.named_parameters()) + list(model.transformer.named_parameters())
-        high_decay_params = list(model.classifier.named_parameters())
-        no_decay = ['bias', 'layer_norm', 'embedding']
-        decay_params = [(n, p) for n, p in low_decay_params if not any(nd in n for nd in no_decay) and "word_embedding" not in n]
-        no_decay_params = [(n, p) for n, p in low_decay_params + high_decay_params if any(nd in n for nd in no_decay) and "word_embedding" not in n]
-        high_decay_params = [(n, p) for n, p in high_decay_params if not any(nd in n for nd in no_decay)]
+    if config.get("optimizer", "adamw").lower() == "lamb":
+        print(f"{C.BLUE}Using LAMB optimizer with robust param grouping{C.RESET}")
+
+        no_decay_keys = ("bias", "LayerNorm.weight", "layer_norm.weight", "embedding", "word_embedding")
+        head_modules = ("classifier.", "lm_head.")
+
+        decay, nodecay, head = [], [], []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if any(k in n for k in no_decay_keys):
+                nodecay.append(p)
+            elif any(h in n for h in head_modules):
+                head.append(p)
+            else:
+                decay.append(p)
+
+        wd = float(config.get("weight_decay", 0.01))
+        head_wd = float(config.get("head_weight_decay", 0.1))
         optimizer_grouped_parameters = [
-        {'params': [p for _, p in decay_params], 'weight_decay': config.get("weight_decay", 0.01)},
-        {'params': [p for _, p in high_decay_params], 'weight_decay': config.get("head_weight_decay", 0.01)},
-        {'params': [p for _, p in no_decay_params], 'weight_decay': 0.0}
+            {"params": decay,   "weight_decay": wd},
+            {"params": head,    "weight_decay": head_wd},
+            {"params": nodecay, "weight_decay": 0.0},
         ]
+
+        if accelerator.is_main_process:
+            print(f"{C.DIM}LAMB param groups — decay: {sum(p.numel() for p in decay):,} params, head: {sum(p.numel() for p in head):,}, no-decay: {sum(p.numel() for p in nodecay):,}{C.RESET}")
+
         optimizer = Lamb(
             optimizer_grouped_parameters,
-            config.get("learning_rate", 1e-2),
+            lr=scaled_lr,  # keep same scaled LR logic and caps as AdamW path
             betas=(0.9, 0.98),
-            eps=1e-8,
+            eps=float(config.get("optimizer_eps", 1e-6)),
         )
    
     # Prepare model, optimizer, and train/test loaders. Leave val_loader unprepared for main-only eval.

@@ -1,0 +1,162 @@
+{
+  "sampled": 8000,
+  "punct_final_rate": 0.4935,
+  "mid_sentence_rate": 0.5065,
+  "function_tail_rate": 0.0,
+  "unk_tail_rate": 0.0,
+  "mid_subword_tail_rate": 0.084,
+  "top_tail_tokens": [
+    [
+      "[unk].'",
+      293
+    ],
+    [
+      "[unk]'",
+      264
+    ],
+    [
+      "'yeah.'",
+      143
+    ],
+    [
+      "'mm.'",
+      103
+    ],
+    [
+      "[unk].",
+      87
+    ],
+    [
+      "'[unk].'",
+      85
+    ],
+    [
+      "it.",
+      70
+    ],
+    [
+      "it?'",
+      65
+    ],
+    [
+      "'yes.'",
+      60
+    ],
+    [
+      "it.'",
+      52
+    ],
+    [
+      "yes.'",
+      46
+    ],
+    [
+      "yeah.'",
+      46
+    ],
+    [
+      "that.",
+      44
+    ],
+    [
+      "that.'",
+      40
+    ],
+    [
+      "cent.",
+      38
+    ],
+    [
+      "mm.'",
+      37
+    ],
+    [
+      "'yeah.",
+      35
+    ],
+    [
+      "'no.'",
+      31
+    ],
+    [
+      "erm'",
+      31
+    ],
+    [
+      "right.'",
+      29
+    ],
+    [
+      "care.",
+      26
+    ],
+    [
+      "that?'",
+      25
+    ],
+    [
+      "you.'",
+      23
+    ],
+    [
+      "'right.'",
+      23
+    ],
+    [
+      "them.",
+      23
+    ]
+  ],
+  "boundary_counts": {
+    "how": {
+      "total": 147,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "that": {
+      "total": 1924,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "what": {
+      "total": 434,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "when": {
+      "total": 240,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "where": {
+      "total": 109,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "which": {
+      "total": 382,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "who": {
+      "total": 255,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "whom": {
+      "total": 4,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "whose": {
+      "total": 9,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    },
+    "why": {
+      "total": 78,
+      "boundary_after": 0,
+      "boundary_after_rate": 0.0
+    }
+  }
+}

@@ -389,7 +389,20 @@ class SentenceAwareDataset(Dataset):
         self.mask_p = mask_p
         self.random_p = random_p
         self.keep_p = keep_p
-        self.n_special_tokens = 6
+        # Dynamically determine structural special token span (must be contiguous prefix 0..N-1)
+        structural_tokens = ["[PAD]","[UNK]","[CLS]","[SEP]","[MASK]","[PAR]","[TAB]","[DOC]","[EOD]","[SPK]"]
+        special_ids = []
+        for tok in structural_tokens:
+            tid = self.tokenizer.token_to_id(tok)
+            if tid is not None:
+                special_ids.append(tid)
+        special_ids = sorted(set(special_ids))
+        if special_ids and special_ids == list(range(len(special_ids))):
+            self.n_special_tokens = len(special_ids)
+        else:
+            self.n_special_tokens = 6  # legacy fallback
+            if special_ids:
+                print(f"[SentenceAwareDataset] Warning: non-contiguous structural token IDs {special_ids}; fallback n_special_tokens=6")
         self.padding_label_id = -100
         
         # Initialize token IDs
@@ -583,35 +596,6 @@ class SentenceAwareDataset(Dataset):
         return tokens, labels
 
 
-if __name__ == "__main__":
-    from tokenizers import Tokenizer
-
-    # Test the original dataset
-    tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
-    dataset = MlmDataset("data/pretrain/tokenized/train_0.pickle.gz", tokenizer, "whole_word")
-    
-    inputs, attention_mask, outputs = dataset[21000]
-
-    for i, output in enumerate(outputs.tolist()):
-        if output != -100:
-            print(i, output, tokenizer.id_to_token(output))
-    
-    # Test the new sentence-aware dataset
-    print("\n" + "="*50)
-    print("Testing SentenceAwareDataset...")
-    
-    try:
-        sentence_dataset = SentenceAwareDataset("./", tokenizer)
-        if len(sentence_dataset) > 0:
-            sample = sentence_dataset[0]
-            print(f"Sample: {sample['input_ids'].shape}, {sample['attention_mask'].shape}, {sample['labels'].shape}")
-            
-            # Check for boundary tokens
-            cls_positions = (sample['input_ids'] == tokenizer.token_to_id("[CLS]")).nonzero()
-            sep_positions = (sample['input_ids'] == tokenizer.token_to_id("[SEP]")).nonzero()
-            print(f"Boundary tokens: {len(cls_positions)} [CLS], {len(sep_positions)} [SEP]")
-    except Exception as e:
-        print(f"Could not test SentenceAwareDataset: {e}")
 
 
 class BasicDataset(AbstractMlmDataset):
@@ -633,13 +617,5 @@ class BasicDataset(AbstractMlmDataset):
 
 
 if __name__ == "__main__":
-    from tokenizers import Tokenizer
-
-    tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")
-    dataset = MlmDataset("data/pretrain/tokenized/train_0.pickle.gz", tokenizer, "whole_word")
-    
-    inputs, attention_mask, outputs = dataset[21000]
-
-    for i, output in enumerate(outputs.tolist()):
-        if output != -100:
-            print(i, output, tokenizer.id_to_token(output))
+    # Minimal smoke test for SentenceAwareDataset only if desired; guarded to avoid heavy load.
+    pass

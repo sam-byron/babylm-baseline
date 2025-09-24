@@ -235,19 +235,15 @@ def save_model_official_way(model, model_config, tokenizer, checkpoint_path):
     print(f"{C.BOLD}{C.GREEN}Model saved the official HuggingFace way! Ready for lm_eval with trust_remote_code=True{C.RESET}")
 
 def save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C, epoch=None):
-    """Save full checkpoint at reduced intervals - includes optimizer state for complete recovery."""
+    """Save model checkpoint at specified intervals."""
     if step % save_steps != 0 or step == 0 or not is_main:
         return
     
     try:
-        print(f"{C.CYAN}[Checkpoint] Starting full save at step {step} (includes optimizer state)...{C.RESET}")
-        
-        # Full save with optimizer state for complete recovery
-        # This is slower but ensures no learning rate/momentum loss on crash recovery
+        print(f"{C.CYAN}[Checkpoint] Starting save at step {step}...{C.RESET}")
         accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
         accelerator.save_model(model, checkpoint_path)
         
-        # Also save HuggingFace compatible version for evaluation
         unwrapped = accelerator.unwrap_model(model)
         save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
         
@@ -255,8 +251,7 @@ def save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_s
         if epoch is not None:
             save_training_state(checkpoint_path, epoch, step, is_main)
         
-        print(f"{C.GREEN}[Checkpoint] Full checkpoint saved at step {step} - complete recovery guaranteed{C.RESET}")
-        
+        print(f"{C.GREEN}[Checkpoint] Saved model state and optimizer at step {step}{C.RESET}")
     except Exception as e:
         print(f"{C.YELLOW}[Checkpoint] Warning: failed to save at step {step}: {e}{C.RESET}")
         import traceback
@@ -307,51 +302,24 @@ def load_training_state(checkpoint_path):
 
 
 def save_epoch_checkpoint(accelerator, model, tokenizer, checkpoint_path, epoch, is_main, C):
-    """Save comprehensive checkpoint at the end of an epoch - includes optimizer state."""
+    """Save checkpoint at the end of an epoch."""
     if not is_main:
         return
     
     try:
         print(f"{C.CYAN}[End-of-Epoch] Saving checkpoint after epoch {epoch+1}...{C.RESET}")
-        
-        # Always do full save at epoch boundaries for safety
         accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
         accelerator.save_model(model, checkpoint_path)
         
-        # Also save the official HuggingFace way for evaluation compatibility
         unwrapped = accelerator.unwrap_model(model)
         save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
         
         # Save that we completed this epoch and reset step to 0 for next epoch
         save_training_state(checkpoint_path, epoch + 1, step=0, is_main=is_main)
         
-        print(f"{C.GREEN}[End-of-Epoch] Full checkpoint saved after completing epoch {epoch+1}{C.RESET}")
+        print(f"{C.GREEN}[End-of-Epoch] Saved checkpoint after completing epoch {epoch+1}{C.RESET}")
         
     except Exception as e:
         print(f"{C.YELLOW}[End-of-Epoch] Warning: failed to save checkpoint: {e}{C.RESET}")
-        import traceback
-        traceback.print_exc()
-
-
-def save_final_checkpoint(accelerator, model, tokenizer, checkpoint_path, is_main, C):
-    """Save final comprehensive checkpoint at the end of training."""
-    if not is_main:
-        return
-    
-    try:
-        print(f"{C.CYAN}[Final] Saving final comprehensive checkpoint...{C.RESET}")
-        
-        # Full save with everything needed for inference and evaluation
-        accelerator.save_state(output_dir=checkpoint_path, safe_serialization=False)
-        accelerator.save_model(model, checkpoint_path)
-        
-        # Save the official HuggingFace way for evaluation compatibility
-        unwrapped = accelerator.unwrap_model(model)
-        save_model_official_way(unwrapped, unwrapped.config, tokenizer, checkpoint_path)
-        
-        print(f"{C.GREEN}[Final] Comprehensive checkpoint saved - ready for evaluation!{C.RESET}")
-        
-    except Exception as e:
-        print(f"{C.YELLOW}[Final] Warning: failed to save final checkpoint: {e}{C.RESET}")
         import traceback
         traceback.print_exc()

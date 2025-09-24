@@ -1,0 +1,14 @@
+{
+  "packs": 317657,
+  "terminal_end": 286135,
+  "nonterminal_end": 31522,
+  "dangling_carried": 50710,
+  "borrow_moves": 503,
+  "short_trailing_dropped": 0,
+  "terminal_end_rate": 0.9007671796938207,
+  "nonterminal_end_rate": 0.0992328203061793,
+  "dangling_carried_rate": 0.15963759652707166,
+  "borrow_move_rate": 0.001583468961804714,
+  "short_trailing_dropped_rate": 0.0,
+  "slices": 99
+}

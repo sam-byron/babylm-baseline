@@ -20,7 +20,7 @@ import time
 import argparse
 import json
 from typing import Union
-from typing import List, Iterator
+from typing import List, Iterator, Any
 import sys
 # Import masking strategies from mlm_dataset
 from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
@@ -37,6 +37,15 @@ class C:
     MAGENTA = "\033[35m"
     CYAN    = "\033[36m"
 
+STRUCTURAL_TOKENS = ["[PAD]","[UNK]","[CLS]","[SEP]","[MASK]","[PAR]","[TAB]","[DOC]","[EOD]","[SPK]"]
+def get_special_token_ids(tokenizer):
+    ids = []
+    for tok in STRUCTURAL_TOKENS:
+        tid = tokenizer.token_to_id(tok)
+        if tid is not None:
+            ids.append(tid)
+    return sorted(set(ids))
+
 # helper to compute total real tokens in a Dataset
 def compute_total_tokens(ds: Union[Dataset, object]) -> int:
     """
@@ -50,27 +59,48 @@ def compute_total_tokens(ds: Union[Dataset, object]) -> int:
     return sum(len(ex) for ex in ds)
 
 class ChunkedDataset(Dataset):
-    # FIX 1: Change the default dtype to torch.long for compatibility with embedding layers.
+    """Dataset over pre-generated fixed-size training blocks stored in chunk*.pt files.
+
+    Two operational modes:
+      1. Preblocked mode (preferred): Each chunk file is a 2-D LongTensor [N, block_size]. We simply
+         index rows without any re-concatenation.
+      2. Legacy concatenation mode: Each chunk file stores a list/1-D sequences requiring chaining
+         into uniform blocks (old pipeline). Retained for backward compatibility.
+    """
     def __init__(self, chunk_paths, block_size, tokenizer, dtype=torch.long, pad_token_id=None, cache_size=50):
-        # shuffle once
         self.chunk_paths = list(chunk_paths)
-        # random.shuffle(self.chunk_paths)
-        self.block_size   = block_size
-        self.tokenizer    = tokenizer
+        self.block_size = block_size
+        self.tokenizer = tokenizer
         self.cls_index = self.tokenizer.token_to_id("[CLS]")
         self.sep_index = self.tokenizer.token_to_id("[SEP]")
-        self.dtype        = dtype
+        self.dtype = dtype
         self.pad_token_id = pad_token_id or 0
-        self.cache_size   = cache_size
-        # path -> concatenated sequence data
-        self._chunk_cache = OrderedDict()
-        
-        # Cache directory for index map
+        self.cache_size = cache_size
+        # path -> loaded tensor (2-D) OR concatenated flat list (legacy)
+        self._chunk_cache: "OrderedDict[str, Any]" = OrderedDict()
+
         self.cache_dir = Path("./cache_index")
         self.cache_dir.mkdir(exist_ok=True)
-        
-        # build a flat index of every block
-        self._build_index()
+
+        # Detect format from first available file
+        sample_path = None
+        for pth in self.chunk_paths:
+            if os.path.exists(pth):
+                sample_path = pth
+                break
+        if sample_path is None:
+            raise ValueError("No existing chunk paths provided to ChunkedDataset")
+
+        sample_obj = torch.load(sample_path, map_location="cpu")
+        self.preblocked = torch.is_tensor(sample_obj) and sample_obj.dim() == 2
+        if self.preblocked and self.block_size is not None and sample_obj.shape[1] != self.block_size:
+            raise ValueError(f"Block size mismatch: arg {self.block_size} vs file width {sample_obj.shape[1]}")
+        if self.preblocked:
+            # Standard fast path
+            self._build_index_preblocked()
+        else:
+            # Fallback to legacy concatenation implementation
+            self._build_index_concat()
 
     def _get_cache_key(self):
         """Generate a cache key based on chunk paths, modification times, and block size."""
@@ -90,50 +120,79 @@ class ChunkedDataset(Dataset):
         return hashlib.md5(cache_str).hexdigest()
     
     # helper to build index entries for one chunk file in parallel (concatenation mode)
-    def _index_for_path(self, args):
+    def _index_for_path_legacy(self, args):
         path, block_size = args
         seqs = torch.load(path, map_location="cpu")
-        
-        # Chain sequences together until we reach target block_size
+        MIN_TAIL = int(0.25 * block_size)
         entries = []
         all_tokens = []
         current_block = []
         current_pos = 0
-        
         for seq in seqs:
             seq_tokens = seq.tolist() if isinstance(seq, torch.Tensor) else seq
-            
-            # Add sequence to current block
             current_block.extend(seq_tokens)
-            
-            # While current block has enough tokens for a full block, create training blocks
-            while len(current_block) >= block_size:  # Reserve space for [CLS] and [SEP]
-                # Extract exactly block_size tokens for the training block
+            while len(current_block) >= block_size:
                 block_tokens = current_block[:block_size]
-                block_tokens = block_tokens
                 all_tokens.extend(block_tokens)
-                
-                # Create index entry
                 start = current_pos
                 end = current_pos + block_size
+                # store (path, seq_index_dummy, start, end)
                 entries.append((path, 0, start, end))
                 current_pos += block_size
-                
-                # Keep remaining tokens for next block
                 current_block = current_block[block_size:]
-        
-        # Handle remaining tokens (if any) - add them if we have at least 2 tokens for MLM
-        if len(current_block) >= 2:
-            current_block = current_block
-            all_tokens.extend(current_block)
-            start = current_pos
-            end = current_pos + len(current_block)
-            entries.append((path, 0, start, end))
-        
+        if len(current_block) <= MIN_TAIL:
+            current_block = []
         return entries, all_tokens
 
-    def _build_index(self):
-        """Create self.index_map = [ (path, seq_idx, start, end), ... ] with caching."""
+    def _build_index_preblocked(self):
+        """Index rows directly for preblocked 2-D tensors."""
+        cache_key = self._get_cache_key() + "_preblocked"
+        cache_file = self.cache_dir / f"index_map_{cache_key}.pkl"
+        if cache_file.exists():
+            try:
+                print(f"{C.CYAN}Loading cached (preblocked) index map from {cache_file}{C.RESET}")
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                self.index_map = cached_data['index_map']
+                self.block_lengths = cached_data['block_lengths']
+                print(f"{C.GREEN}Loaded {len(self.index_map)} row entries from cache{C.RESET}")
+                return
+            except Exception as e:
+                print(f"{C.YELLOW}Cache load failed, rebuilding preblocked index: {e}{C.RESET}")
+                try: cache_file.unlink()
+                except Exception: pass
+        print(f"{C.BLUE}Building preblocked index (row-level) ...{C.RESET}")
+        self.index_map = []
+        self.block_lengths = []
+        total_rows = 0
+        for pth in self.chunk_paths:
+            try:
+                tensor = torch.load(pth, map_location='cpu')
+                if not (torch.is_tensor(tensor) and tensor.dim() == 2):
+                    raise ValueError("Encountered non-2D tensor in preblocked mode; mixed formats not supported")
+                n_rows, width = tensor.shape
+                if width != self.block_size:
+                    raise ValueError(f"Width mismatch in {pth}: expected {self.block_size} got {width}")
+                # store (path, row_idx, start, end) with synthetic offsets for compatibility
+                for r in range(n_rows):
+                    start = r * self.block_size
+                    end = start + self.block_size
+                    self.index_map.append((pth, r, start, end))
+                    self.block_lengths.append(self.block_size)
+                total_rows += n_rows
+            except Exception as e:
+                print(f"{C.RED}Failed indexing {pth}: {e}{C.RESET}")
+        print(f"{C.MAGENTA}Preblocked stats:{C.RESET} rows={total_rows:,} block_size={self.block_size}")
+        # Cache
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump({'index_map': self.index_map, 'block_lengths': self.block_lengths}, f)
+            print(f"{C.GREEN}Cached preblocked index to {cache_file}{C.RESET}")
+        except Exception as e:
+            print(f"{C.YELLOW}Warning: failed to cache preblocked index: {e}{C.RESET}")
+
+    def _build_index_concat(self):
+        """Legacy concatenation path (slower) retained for backward compatibility."""
         cache_key = self._get_cache_key()
         cache_file = self.cache_dir / f"index_map_{cache_key}.pkl"
         
@@ -157,16 +216,15 @@ class ChunkedDataset(Dataset):
                     pass
         
         # Build index from scratch
-        print(f"{C.BLUE}Building index map from scratch with sequence concatenation...{C.RESET}")
+        print(f"{C.BLUE}Building index map from scratch with legacy concatenation...{C.RESET}")
         args = [(path, self.block_size) for path in self.chunk_paths]
         max_workers = min(mp.cpu_count(), len(args))
         self.index_map = []
-        self._concatenated_data = {}  # Store concatenated sequences
-        
+        self._concatenated_data = {}
         with mp.Pool(processes=max_workers) as pool:
-            for entries, concatenated_tokens in pool.imap_unordered(self._index_for_path, args):
-                if entries:  # Only process if we got valid entries
-                    path = entries[0][0]  # Get path from first entry
+            for entries, concatenated_tokens in pool.imap_unordered(self._index_for_path_legacy, args):
+                if entries:
+                    path = entries[0][0]
                     self._concatenated_data[path] = concatenated_tokens
                     self.index_map.extend(entries)
 
@@ -231,37 +289,43 @@ class ChunkedDataset(Dataset):
         return len(self.index_map)
 
     def __getitem__(self, idx):
-        path, seq_i, start, end = self.index_map[idx]
-        
-        # Get concatenated data for this chunk
-        if path not in self._chunk_cache:
-            # Load from cached concatenated data if available
-            if hasattr(self, '_concatenated_data') and path in self._concatenated_data:
-                concatenated_tokens = self._concatenated_data[path]
-            else:
-                # Fallback: load and concatenate on-the-fly
-                seqs = torch.load(path, map_location="cpu")
-                concatenated_tokens = []
-                for seq in seqs:
-                    if isinstance(seq, torch.Tensor):
-                        concatenated_tokens.extend(seq.tolist())
-                    else:
-                        concatenated_tokens.extend(seq)
-            
-            self._chunk_cache[path] = concatenated_tokens
-            # evict oldest if over capacity
-            if len(self._chunk_cache) > self.cache_size:
-                self._chunk_cache.popitem(last=False)
-        
-        # Get the block from the concatenated sequence
-        concatenated_seq = self._chunk_cache[path]
-        block_tokens = concatenated_seq[start:end]
-        
-        # Pad block to block_size if needed
-        if len(block_tokens) < self.block_size:
-            block_tokens = block_tokens + [self.pad_token_id] * (self.block_size - len(block_tokens))
-        
-        return torch.tensor(block_tokens, dtype=self.dtype)
+        path, row_or_seq, start, end = self.index_map[idx]
+        if self.preblocked:
+            # Load entire 2-D tensor into cache lazily
+            if path not in self._chunk_cache:
+                tensor = torch.load(path, map_location='cpu')
+                if not (torch.is_tensor(tensor) and tensor.dim() == 2):
+                    raise ValueError(f"Expected 2-D tensor in preblocked mode for {path}")
+                self._chunk_cache[path] = tensor
+                if len(self._chunk_cache) > self.cache_size:
+                    self._chunk_cache.popitem(last=False)
+            tensor = self._chunk_cache[path]
+            block = tensor[row_or_seq]
+            # Ensure dtype long
+            if block.dtype != torch.long:
+                block = block.long()
+            return block
+        else:
+            # Legacy concatenation path
+            if path not in self._chunk_cache:
+                if hasattr(self, '_concatenated_data') and path in self._concatenated_data:
+                    concatenated_tokens = self._concatenated_data[path]
+                else:
+                    seqs = torch.load(path, map_location='cpu')
+                    concatenated_tokens = []
+                    for seq in seqs:
+                        if isinstance(seq, torch.Tensor):
+                            concatenated_tokens.extend(seq.tolist())
+                        else:
+                            concatenated_tokens.extend(seq)
+                self._chunk_cache[path] = concatenated_tokens
+                if len(self._chunk_cache) > self.cache_size:
+                    self._chunk_cache.popitem(last=False)
+            concatenated_seq = self._chunk_cache[path]
+            block_tokens = concatenated_seq[start:end]
+            if len(block_tokens) < self.block_size:
+                block_tokens = block_tokens + [self.pad_token_id] * (self.block_size - len(block_tokens))
+            return torch.tensor(block_tokens, dtype=self.dtype)
 
 
 def create_and_cache_splits(config):
@@ -498,14 +562,6 @@ def _create_chunked_loader(config, tokenizer, cache_path):
     # Load or create cached splits
     train_paths, val_paths, test_paths = create_and_cache_splits(config)
 
-def _create_chunked_loader(config, tokenizer, cache_path):
-    """Create data loaders using the traditional chunked dataset (original implementation)."""
-    block_size = config["block_size"]
-    batch_size = config["batch_size"]
-
-    # Load or create cached splits
-    train_paths, val_paths, test_paths = create_and_cache_splits(config)
-
     # Get pad token ID from tokenizers.Tokenizer object
     pad_id = tokenizer.token_to_id("[PAD]")
     if pad_id is None:
@@ -548,7 +604,8 @@ def _create_chunked_loader(config, tokenizer, cache_path):
         # The collator will handle masking on-the-fly
         
         # Initialize for legacy compatibility
-        n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
+        special_ids = get_special_token_ids(tokenizer)
+        n_special_tokens = max(special_ids) + 1 if special_ids and list(range(len(special_ids))) == special_ids else len(special_ids)
         
     else:
         print(f"{C.BLUE}Using static masking strategy{C.RESET}")
@@ -557,7 +614,8 @@ def _create_chunked_loader(config, tokenizer, cache_path):
         masking_strategy_name = config.get("masking_strategy", "span")
         
         # Initialize the appropriate masking strategy
-        n_special_tokens = 6  # [PAD], [UNK], [CLS], [SEP], [MASK], [unused0]
+        special_ids = get_special_token_ids(tokenizer)
+        n_special_tokens = max(special_ids) + 1 if special_ids and list(range(len(special_ids))) == special_ids else len(special_ids)
         mask_p = config.get("mask_p", 0.15)  # 15% masking probability
         random_p = config.get("random_p", 0.1)  # 10% random token replacement
         keep_p = config.get("keep_p", 0.1)  # 10% keep original token
