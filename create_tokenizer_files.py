@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """
-Programmatically create all necessary tokenizer files for transformers compatibility
+Programmatically create all necessary tokenizer files for transformers compatibility.
+
+Generates:
+ - vocab.txt (sorted by id)
+ - tokenizer_config.json (BERT-compatible defaults)
+ - special_tokens_map.json (auto-detected specials)
+ - tokenizer.json (copied if provided and not present)
+
+Also updates config.json with an auto_map entry for AutoTokenizer so
+AutoTokenizer.from_pretrained can resolve a standard tokenizer class
+without relying on the custom config class.
 """
 
+import argparse
 import json
 import os
-from tokenizer import Tokenizer
+from tokenizers import Tokenizer as HFTokenizer
 from training_utils import generate_special_tokens_map
 
-def create_tokenizer_files(checkpoint_path, tokenizer_path="./tokenizer.json"):
+def create_tokenizer_files(checkpoint_path: str, tokenizer_path: str = "./tokenizer.json"):
     """
     Create all necessary tokenizer files for transformers compatibility
     """
     print(f"Creating tokenizer files in {checkpoint_path}")
     
     # Load your custom tokenizer
-    tokenizer = Tokenizer(tokenizer_path)
+    tokenizer = HFTokenizer.from_file(tokenizer_path)
     
     # Get vocabulary from the tokenizer
-    vocab = tokenizer.tokenizer.get_vocab()
+    vocab = tokenizer.get_vocab()
     vocab_size = len(vocab)
     print(f"Vocabulary size: {vocab_size}")
     
@@ -53,7 +64,7 @@ def create_tokenizer_files(checkpoint_path, tokenizer_path="./tokenizer.json"):
     print(f"Created {tokenizer_config_file}")
     
     # Create special_tokens_map.json using the refactored utility
-    generate_special_tokens_map(tokenizer.tokenizer, checkpoint_path)
+    generate_special_tokens_map(tokenizer, checkpoint_path)
     
     # Copy the existing tokenizer.json if it doesn't exist in checkpoint
     tokenizer_json_dest = os.path.join(checkpoint_path, "tokenizer.json")
@@ -64,7 +75,7 @@ def create_tokenizer_files(checkpoint_path, tokenizer_path="./tokenizer.json"):
     
     print("All tokenizer files created successfully!")
 
-def update_config_for_tokenizer(checkpoint_path):
+def update_config_for_tokenizer(checkpoint_path: str):
     """
     Update config.json to include tokenizer auto_map
     """
@@ -79,7 +90,10 @@ def update_config_for_tokenizer(checkpoint_path):
             config["auto_map"] = {}
         
         # Use standard BertTokenizer since we're creating BERT-compatible files
-        config["auto_map"]["AutoTokenizer"] = ["transformers.BertTokenizer", "transformers.BertTokenizerFast"]
+        config["auto_map"]["AutoTokenizer"] = [
+            "transformers.BertTokenizer",
+            "transformers.BertTokenizerFast",
+        ]
         
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
@@ -89,16 +103,18 @@ def update_config_for_tokenizer(checkpoint_path):
         print(f"Warning: {config_path} not found")
 
 if __name__ == "__main__":
-    checkpoint_path = "./model_babylm_bert_ltg/checkpoint"
-    tokenizer_path = "./tokenizer.json"
-    
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checkpoint_path", required=True, help="Directory containing model/config.json where tokenizer files will be written")
+    ap.add_argument("--tokenizer_path", default="./tokenizer.json", help="Path to tokenizer.json from tokenizers library")
+    args = ap.parse_args()
+
     # Create all tokenizer files
-    create_tokenizer_files(checkpoint_path, tokenizer_path)
-    
+    create_tokenizer_files(args.checkpoint_path, args.tokenizer_path)
+
     # Update config.json
-    update_config_for_tokenizer(checkpoint_path)
-    
-    print(f"\nAll files created in {checkpoint_path}:")
-    files = os.listdir(checkpoint_path)
+    update_config_for_tokenizer(args.checkpoint_path)
+
+    print(f"\nAll files created in {args.checkpoint_path}:")
+    files = os.listdir(args.checkpoint_path)
     for file in sorted(files):
         print(f"  - {file}")
