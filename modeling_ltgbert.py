@@ -432,6 +432,12 @@ class LtgBertModel(LtgBertPreTrainedModel):
 @add_start_docstrings("""LTG-BERT model with a `language modeling` head on top.""", LTG_BERT_START_DOCSTRING)
 class LtgBertForMaskedLM(LtgBertModel):
     _keys_to_ignore_on_load_unexpected = ["head"]
+    # The final classifier weight is tied to the input embedding weight.
+    # Transformers may omit saving the tied copy to reduce checkpoint size,
+    # which would otherwise surface as a "newly initialized" warning on load.
+    _keys_to_ignore_on_load_missing = [
+        "classifier.nonlinearity.5.weight",
+    ]
 
     def __init__(self, config):
         super().__init__(config, add_mlm_layer=True)
@@ -439,10 +445,19 @@ class LtgBertForMaskedLM(LtgBertModel):
         self._tp_plan = []
 
     def get_output_embeddings(self):
-        return self.classifier.nonlinearity[-1].weight
+        # Return the output head module (nn.Linear) for HF compatibility
+        return self.classifier.nonlinearity[-1]
 
     def set_output_embeddings(self, new_embeddings):
-        self.classifier.nonlinearity[-1].weight = new_embeddings
+        # Allow replacing the entire output head module
+        self.classifier.nonlinearity[-1] = new_embeddings
+
+    def tie_weights(self):
+        # Ensure output layer is tied to input embeddings
+        try:
+            self.classifier.nonlinearity[-1].weight = self.embedding.word_embedding.weight
+        except Exception:
+            pass
 
     @add_start_docstrings_to_model_forward(LTG_BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     def forward(
