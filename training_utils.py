@@ -110,8 +110,10 @@ def log_first_batch_info(accelerator, batch, tokenizer, loss, C):
 
 def forward_pass(model, batch):
     """Perform model forward pass with proper attention mask conversion."""
-    # Convert attention mask to bool (0 -> True for padding)
-    batch["attention_mask"] = (batch["attention_mask"] == 0)
+    # Do NOT invert here; model handles conversion/inversion internally.
+    # Ensure tensor exists and is the standard 1 (real) / 0 (pad) format.
+    # The model will convert to bool and invert to produce a padding mask.
+    # If a bool mask is provided, it's still fine (the model calls .bool() then ~).
     
     prediction = model(
         input_ids=batch["input_ids"],

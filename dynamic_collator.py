@@ -47,24 +47,24 @@ class DynamicMaskingCollator:
         ])
         
         # Initialize the masking strategy - REUSE existing implementation!
-        # Extend protection to new structural tokens if they form a contiguous prefix
+        # Build explicit protected_ids for structural tokens; pass through to strategies.
         structural_tokens = [
             "[PAD]","[UNK]","[CLS]","[SEP]","[MASK]",
             "[PAR]","[TAB]","[DOC]","[EOD]","[SPK]"
         ]
-        special_ids = []
+        protected_ids_set = set()
         for tok in structural_tokens:
             tid = tokenizer.token_to_id(tok)
-            if tid is not None:
-                special_ids.append(tid)
-        special_ids = sorted(set(special_ids))
+            if isinstance(tid, int) and tid >= 0:
+                protected_ids_set.add(int(tid))
+        special_ids = sorted(protected_ids_set)
+        # Back-compat heuristic for n_special_tokens expected by strategies
         if special_ids and special_ids == list(range(len(special_ids))):
             n_special_tokens = len(special_ids)
         else:
-            # Fallback: assume original 6 (legacy) to avoid over-excluding normal vocab tokens
-            n_special_tokens = 6
+            n_special_tokens = max(6, len(special_ids))
             if special_ids:
-                print(f"[DynamicCollator] Warning: structural special token IDs not contiguous from 0. Using legacy n_special_tokens=6. IDs={special_ids}")
+                print(f"[DynamicCollator] Warning: special token IDs non-contiguous. Using n_special_tokens={n_special_tokens} with explicit protected_ids of size {len(protected_ids_set)}")
         
         masking_strategies = {
             "span": SpanMaskingStrategy,
@@ -85,6 +85,7 @@ class DynamicMaskingCollator:
                 random_p=random_probability,
                 keep_p=keep_probability,
                 max_span_length=max_span_length,
+                protected_ids=sorted(protected_ids_set),
                 # seq_length=self.seq_length,
             )
         else:   
@@ -95,9 +96,10 @@ class DynamicMaskingCollator:
                 padding_label_id=-100,
                 random_p=random_probability,
                 keep_p=keep_probability,
+                protected_ids=sorted(protected_ids_set),
                 # seq_length=self.seq_length,
             )
-        print(f"[DynamicCollator] 🎭 Using strategy={self.masking_strategy} n_special_tokens={n_special_tokens} span_max={max_span_length if masking_strategy=='span' else 'N/A'}")
+        print(f"[DynamicCollator] 🎭 Using strategy={self.masking_strategy} n_special_tokens={n_special_tokens} protected={len(protected_ids_set)} span_max={max_span_length if masking_strategy=='span' else 'N/A'}")
 
     def __call__(self, examples: List[Union[List[int], torch.Tensor, Dict[str, torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # Convert examples to tensors if needed
@@ -133,12 +135,8 @@ class DynamicMaskingCollator:
             padded_input_ids.append(masked_tokens)
             all_labels.append(labels)
             
-            # Create attention mask (1 for real tokens, 0 for padding)
-            if padding_length > 0:
-                attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-                                          torch.zeros(padding_length, dtype=torch.long)])
-            else:
-                attention_mask = torch.ones(len(seq), dtype=torch.long)
+            # Create attention mask from actual PAD positions (1 for real tokens, 0 for padding)
+            attention_mask = (padded_seq != self.pad_token_id).long()
             attention_masks.append(attention_mask)
         
         # Stack into batch tensors

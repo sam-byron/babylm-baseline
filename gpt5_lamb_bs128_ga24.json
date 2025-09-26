@@ -24,9 +24,9 @@
   "tokenizer_path": "./data/pretrain/wordpiece_vocab.json",
 
   "optimizer": "lamb",
-  "learning_rate": 0.006,
+  "learning_rate": 0.001,
   "lr_scale_alpha": 0.5,
-  "peak_lr_cap": 0.01,
+  "peak_lr_cap": 0.05,
   "min_lr": 1e-5,
   "warmup_steps_proportion": 0.01,
   "optimizer_eps": 1e-6,

@@ -76,11 +76,10 @@ class ChunkedDataset(Dataset):
         self.dtype = dtype
         self.pad_token_id = pad_token_id or 0
         self.cache_size = cache_size
-        # path -> loaded tensor (2-D) OR concatenated flat list (legacy)
+    # path -> loaded tensor (2-D) OR concatenated flat list (legacy)
         self._chunk_cache: "OrderedDict[str, Any]" = OrderedDict()
 
-        self.cache_dir = Path("./cache_index")
-        self.cache_dir.mkdir(exist_ok=True)
+        # Defer cache_dir until we know dataset root; place under chunk folder for stability
 
         # Detect format from first available file
         sample_path = None
@@ -91,6 +90,11 @@ class ChunkedDataset(Dataset):
         if sample_path is None:
             raise ValueError("No existing chunk paths provided to ChunkedDataset")
 
+        # Set cache directory relative to dataset root for reproducibility
+        root_dir = Path(sample_path).parent
+        self.cache_dir = root_dir / "cache_index"
+        self.cache_dir.mkdir(exist_ok=True)
+
         sample_obj = torch.load(sample_path, map_location="cpu")
         self.preblocked = torch.is_tensor(sample_obj) and sample_obj.dim() == 2
         if self.preblocked and self.block_size is not None and sample_obj.shape[1] != self.block_size:
@@ -98,9 +102,6 @@ class ChunkedDataset(Dataset):
         if self.preblocked:
             # Standard fast path
             self._build_index_preblocked()
-        else:
-            # Fallback to legacy concatenation implementation
-            self._build_index_concat()
 
     def _get_cache_key(self):
         """Generate a cache key based on chunk paths, modification times, and block size."""
@@ -119,30 +120,7 @@ class ChunkedDataset(Dataset):
         cache_str = str(cache_input).encode('utf-8')
         return hashlib.md5(cache_str).hexdigest()
     
-    # helper to build index entries for one chunk file in parallel (concatenation mode)
-    def _index_for_path_legacy(self, args):
-        path, block_size = args
-        seqs = torch.load(path, map_location="cpu")
-        MIN_TAIL = int(0.25 * block_size)
-        entries = []
-        all_tokens = []
-        current_block = []
-        current_pos = 0
-        for seq in seqs:
-            seq_tokens = seq.tolist() if isinstance(seq, torch.Tensor) else seq
-            current_block.extend(seq_tokens)
-            while len(current_block) >= block_size:
-                block_tokens = current_block[:block_size]
-                all_tokens.extend(block_tokens)
-                start = current_pos
-                end = current_pos + block_size
-                # store (path, seq_index_dummy, start, end)
-                entries.append((path, 0, start, end))
-                current_pos += block_size
-                current_block = current_block[block_size:]
-        if len(current_block) <= MIN_TAIL:
-            current_block = []
-        return entries, all_tokens
+
 
     def _build_index_preblocked(self):
         """Index rows directly for preblocked 2-D tensors."""
@@ -191,80 +169,7 @@ class ChunkedDataset(Dataset):
         except Exception as e:
             print(f"{C.YELLOW}Warning: failed to cache preblocked index: {e}{C.RESET}")
 
-    def _build_index_concat(self):
-        """Legacy concatenation path (slower) retained for backward compatibility."""
-        cache_key = self._get_cache_key()
-        cache_file = self.cache_dir / f"index_map_{cache_key}.pkl"
-        
-        # Try to load from cache first
-        if cache_file.exists():
-            try:
-                print(f"{C.CYAN}Loading cached index map from {cache_file}{C.RESET}")
-                with open(cache_file, 'rb') as f:
-                    cached_data = pickle.load(f)
-                    self.index_map = cached_data['index_map']
-                    self.block_lengths = cached_data['block_lengths']
-                    self._concatenated_data = cached_data.get('concatenated_data', {})
-                    print(f"{C.GREEN}Loaded {len(self.index_map)} index entries from cache{C.RESET}")
-                    return
-            except (pickle.PickleError, KeyError, EOFError) as e:
-                print(f"{C.YELLOW}Cache file corrupted, rebuilding index: {e}{C.RESET}")
-                # Remove corrupted cache file
-                try:
-                    cache_file.unlink()
-                except OSError:
-                    pass
-        
-        # Build index from scratch
-        print(f"{C.BLUE}Building index map from scratch with legacy concatenation...{C.RESET}")
-        args = [(path, self.block_size) for path in self.chunk_paths]
-        max_workers = min(mp.cpu_count(), len(args))
-        self.index_map = []
-        self._concatenated_data = {}
-        with mp.Pool(processes=max_workers) as pool:
-            for entries, concatenated_tokens in pool.imap_unordered(self._index_for_path_legacy, args):
-                if entries:
-                    path = entries[0][0]
-                    self._concatenated_data[path] = concatenated_tokens
-                    self.index_map.extend(entries)
-
-        # improve cache locality: group by (path, seq_i, start)
-        self.index_map.sort(key=lambda e: (e[0], e[1], e[2]))
-        
-        # Precompute the true length of each block (before padding)
-        self.block_lengths = [end - start for (_, _, start, end) in self.index_map]
-        
-        print(f"{C.MAGENTA}Concatenation statistics:{C.RESET}")
-        total_blocks = len(self.index_map)
-        total_tokens = sum(self.block_lengths)
-        avg_block_length = total_tokens / total_blocks if total_blocks > 0 else 0
-        full_blocks = sum(1 for length in self.block_lengths if length == self.block_size)
-        print(f"  Total blocks: {total_blocks:,}")
-        print(f"  Full blocks ({self.block_size} tokens): {full_blocks:,} ({full_blocks/total_blocks*100:.1f}%)")
-        print(f"  Average block length: {avg_block_length:.1f} tokens")
-        print(f"  Total tokens: {total_tokens:,}")
-        
-        # Cache the results
-        try:
-            cache_data = {
-                'index_map': self.index_map,
-                'block_lengths': self.block_lengths,
-                'concatenated_data': self._concatenated_data,
-                'cache_key': cache_key,
-                'created_at': time.time()
-            }
-            with open(cache_file, 'wb') as f:
-                pickle.dump(cache_data, f)
-            print(f"{C.GREEN}Cached index map to {cache_file}{C.RESET}")
-            
-            # Clean up old cache files
-            self._cleanup_old_cache_files()
-            
-        except (OSError, pickle.PickleError) as e:
-            print(f"{C.YELLOW}Warning: Failed to cache index map: {e}{C.RESET}")
-        
-        print(f"{C.CYAN}Built {len(self.index_map)} index entries with concatenation{C.RESET}")
-
+    
     def _cleanup_old_cache_files(self, keep_latest=5):
         """Remove old cache files, keeping only the most recent ones."""
         try:
@@ -300,32 +205,12 @@ class ChunkedDataset(Dataset):
                 if len(self._chunk_cache) > self.cache_size:
                     self._chunk_cache.popitem(last=False)
             tensor = self._chunk_cache[path]
-            block = tensor[row_or_seq]
+            self._chunk_cache.move_to_end(path, last=True)
+            block = tensor[row_or_seq].clone()
             # Ensure dtype long
             if block.dtype != torch.long:
                 block = block.long()
             return block
-        else:
-            # Legacy concatenation path
-            if path not in self._chunk_cache:
-                if hasattr(self, '_concatenated_data') and path in self._concatenated_data:
-                    concatenated_tokens = self._concatenated_data[path]
-                else:
-                    seqs = torch.load(path, map_location='cpu')
-                    concatenated_tokens = []
-                    for seq in seqs:
-                        if isinstance(seq, torch.Tensor):
-                            concatenated_tokens.extend(seq.tolist())
-                        else:
-                            concatenated_tokens.extend(seq)
-                self._chunk_cache[path] = concatenated_tokens
-                if len(self._chunk_cache) > self.cache_size:
-                    self._chunk_cache.popitem(last=False)
-            concatenated_seq = self._chunk_cache[path]
-            block_tokens = concatenated_seq[start:end]
-            if len(block_tokens) < self.block_size:
-                block_tokens = block_tokens + [self.pad_token_id] * (self.block_size - len(block_tokens))
-            return torch.tensor(block_tokens, dtype=self.dtype)
 
 
 def create_and_cache_splits(config):
@@ -449,14 +334,11 @@ def data_loader(config, tokenizer, cache_path):
     batch_size = config["batch_size"]
     
     # Check if we should use sentence-aware processing
-    use_sentence_aware = config.get("use_sentence_aware", False)
+    use_sentence_aware = config.get("use_sentence_aware", True)
     
     if use_sentence_aware:
         print(f"{C.MAGENTA}🎯 Using Sentence-Aware Dataset for improved syntax learning{C.RESET}")
         return _create_sentence_aware_loader(config, tokenizer, cache_path)
-    else:
-        print(f"{C.BLUE}Using traditional document-level chunked dataset{C.RESET}")
-        return _create_chunked_loader(config, tokenizer, cache_path)
 
 def _create_sentence_aware_loader(config, tokenizer, cache_path):
     """Create data loaders using the sentence-aware dataset."""
@@ -470,7 +352,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
         full_dataset = SentenceAwareDataset(
             cache_path=cache_path,
             tokenizer=tokenizer,
-            seq_length=config.get("seq_length", 512),
+            seq_length=config.get("block_size", 512),
             mask_p=config.get("mask_p", 0.15),
             random_p=config.get("random_p", 0.1),
             keep_p=config.get("keep_p", 0.1)
@@ -492,233 +374,74 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
         
         print(f"{C.CYAN}Dataset splits → train: {len(train_dataset)}, val: {len(val_dataset)}, test: {len(test_dataset)}{C.RESET}")
         
-        # Sentence-aware data collator (handles batching of variable-length sentences)
-        def sentence_aware_collate_fn(batch):
-            """Custom collate function for sentence-aware data with proper padding."""
-            
-            # Since sequences are now padded to seq_length, just stack them
-            input_ids_list = [item['input_ids'] for item in batch]
-            attention_mask_list = [item['attention_mask'] for item in batch]
-            labels_list = [item['labels'] for item in batch]
-            
-            # Stack tensors (all should be same length now)
-            return {
-                'input_ids': torch.stack(input_ids_list),
-                'attention_mask': torch.stack(attention_mask_list),
-                'labels': torch.stack(labels_list)
-            }
+        # Always use dynamic masking for sentence-aware mode for now
+        from dynamic_collator import create_dynamic_collator
+        base_collate = create_dynamic_collator(config, tokenizer)
+
+        def sentence_dynamic_collate_fn(batch):
+            """Adapter that extracts raw input_ids from dataset items and delegates to dynamic collator."""
+            seqs = []
+            for item in batch:
+                if isinstance(item, dict):
+                    seqs.append(item.get('input_ids', item))
+                else:
+                    seqs.append(item)
+            return base_collate(seqs)
         
         # Create data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=config["batch_size"],
             shuffle=True,
-            num_workers=4,  # Restored moderate multiprocessing
-            pin_memory=True,  # Restored pin_memory - you have plenty of GPU memory
-            collate_fn=sentence_aware_collate_fn,
-            drop_last=True
+            num_workers=4,  # moderate multiprocessing
+            pin_memory=True,
+            collate_fn=sentence_dynamic_collate_fn,
+            drop_last=True,
         )
         
         val_loader = DataLoader(
             val_dataset,
             batch_size=config["batch_size"],
             shuffle=False,
-            num_workers=2,  # Restored moderate multiprocessing  
-            pin_memory=True,  # Restored pin_memory
-            collate_fn=sentence_aware_collate_fn,
-            drop_last=True
+            num_workers=2,
+            pin_memory=True,
+            collate_fn=sentence_dynamic_collate_fn,
+            drop_last=True,
         )
         
         test_loader = DataLoader(
             test_dataset,
             batch_size=config["batch_size"],
             shuffle=False,
-            num_workers=2,  # Restored moderate multiprocessing
-            pin_memory=True,  # Restored pin_memory
-            collate_fn=sentence_aware_collate_fn,
-            drop_last=True
+            num_workers=2,
+            pin_memory=True,
+            collate_fn=sentence_dynamic_collate_fn,
+            drop_last=True,
         )
         
-        # Estimate total tokens
-        avg_sentence_length = sum(len(full_dataset.sentences[i]) for i in range(min(1000, len(full_dataset.sentences)))) / min(1000, len(full_dataset.sentences))
-        total_tokens_train = int(len(train_dataset) * avg_sentence_length)
+        # Compute total tokens precisely (train split)
+        if hasattr(full_dataset, "sequences") and hasattr(train_dataset, "indices"):
+            # Fast path: sum lengths directly from underlying storage using subset indices
+            total_tokens_train = sum(int(len(full_dataset.sequences[i])) for i in train_dataset.indices)
+            avg_sentence_length = total_tokens_train / max(1, len(train_dataset))
+        else:
+            # Fallback: iterate the subset (slower but exact)
+            total_tokens_train = 0
+            for item in train_dataset:
+                seq = item['input_ids'] if isinstance(item, dict) else item
+                total_tokens_train += int(len(seq))
+            avg_sentence_length = total_tokens_train / max(1, len(train_dataset))
         
         print(f"{C.GREEN}Sentence-aware data loaders created successfully{C.RESET}")
         print(f"{C.CYAN}Average sentence length: {avg_sentence_length:.1f} tokens{C.RESET}")
-        print(f"{C.CYAN}Estimated total training tokens: {total_tokens_train:,}{C.RESET}")
+        print(f"{C.CYAN}Total training tokens (exact): {total_tokens_train:,}{C.RESET}")
         
-        return train_loader, val_loader, test_loader, sentence_aware_collate_fn, total_tokens_train
+        return train_loader, val_loader, test_loader, sentence_dynamic_collate_fn, total_tokens_train
         
     except Exception as e:
         print(f"{C.RED}Error creating sentence-aware dataset: {e}{C.RESET}")
-        print(f"{C.YELLOW}Falling back to traditional chunked dataset...{C.RESET}")
-        return _create_chunked_loader(config, tokenizer, cache_path)
 
-def _create_chunked_loader(config, tokenizer, cache_path):
-    """Create data loaders using the traditional chunked dataset (original implementation)."""
-    block_size = config["block_size"]
-    batch_size = config["batch_size"]
 
-    # Load or create cached splits
-    train_paths, val_paths, test_paths = create_and_cache_splits(config)
-
-    # Get pad token ID from tokenizers.Tokenizer object
-    pad_id = tokenizer.token_to_id("[PAD]")
-    if pad_id is None:
-        raise ValueError("PAD token not found in tokenizer vocabulary")
-    print(f"{C.BLUE}Creating ChunkedDataset instances...{C.RESET}")
-    train_ds = ChunkedDataset(train_paths, block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
-    val_ds   = ChunkedDataset(val_paths,   block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
-    test_ds  = ChunkedDataset(test_paths,  block_size=block_size, tokenizer=tokenizer, pad_token_id=pad_id)
-
-    # Compute total tokens for each split
-    total_tokens_train = sum(train_ds.block_lengths)
-    total_tokens_val   = sum(val_ds.block_lengths)
-    total_tokens_test  = sum(test_ds.block_lengths)
-    print(f"{C.CYAN}Total tokens → train: {total_tokens_train:,}, val: {total_tokens_val:,}, test: {total_tokens_test:,}{C.RESET}")
-
-    # Print length of datasets
-    print(f"{C.CYAN}Train dataset length: {len(train_ds)}{C.RESET}")
-    print(f"{C.CYAN}Val dataset length: {len(val_ds)}{C.RESET}")
-    print(f"{C.CYAN}Test dataset length: {len(test_ds)}{C.RESET}")
-
-    # Get special token IDs for our custom tokenizer
-    mask_token_id = tokenizer.token_to_id("[MASK]")
-    if mask_token_id is None:
-        raise ValueError("MASK token not found in tokenizer vocabulary")
-    
-    # Import masking strategies (needed for both static and dynamic paths)
-    from mlm_dataset import SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy
-    
-    # Check if dynamic masking is enabled
-    use_dynamic_masking = config.get("use_dynamic_masking", False)
-    
-    if use_dynamic_masking:
-        print(f"{C.MAGENTA}🎭 Using RoBERTa-style Dynamic Masking{C.RESET}")
-        from dynamic_collator import create_dynamic_collator
-        
-        # Create dynamic masking collator
-        collate_fn = create_dynamic_collator(config, tokenizer)
-        
-        # For dynamic masking, we don't need to pre-apply masking to datasets
-        # The collator will handle masking on-the-fly
-        
-        # Initialize for legacy compatibility
-        special_ids = get_special_token_ids(tokenizer)
-        n_special_tokens = max(special_ids) + 1 if special_ids and list(range(len(special_ids))) == special_ids else len(special_ids)
-        
-    else:
-        print(f"{C.BLUE}Using static masking strategy{C.RESET}")
-        
-        # Get masking strategy from config (default to "span")
-        masking_strategy_name = config.get("masking_strategy", "span")
-        
-        # Initialize the appropriate masking strategy
-        special_ids = get_special_token_ids(tokenizer)
-        n_special_tokens = max(special_ids) + 1 if special_ids and list(range(len(special_ids))) == special_ids else len(special_ids)
-        mask_p = config.get("mask_p", 0.15)  # 15% masking probability
-        random_p = config.get("random_p", 0.1)  # 10% random token replacement
-        keep_p = config.get("keep_p", 0.1)  # 10% keep original token
-        
-        masking_strategies = {
-            "span": SpanMaskingStrategy,
-            "subword": SubwordMaskingStrategy,
-            "whole_word": WholeWordMaskingStrategy,
-        }
-        
-        if masking_strategy_name not in masking_strategies:
-            raise ValueError(f"Unknown masking strategy: {masking_strategy_name}. Choose from {list(masking_strategies.keys())}")
-        
-        masking_strategy_class = masking_strategies[masking_strategy_name]
-        masking_strategy = masking_strategy_class(
-            mask_p=mask_p,
-            tokenizer=tokenizer,
-            n_special_tokens=n_special_tokens,
-            padding_label_id=-100,
-            random_p=random_p,
-            keep_p=keep_p,
-        )
-        
-        print(f"{C.BLUE}Using {masking_strategy_name} masking strategy (mask_p={mask_p}, random_p={random_p}, keep_p={keep_p}){C.RESET}")
-        
-        # Custom MLM collator using the chosen masking strategy (static)
-        def collate_fn(examples):
-            # examples is a list of token ID lists
-            # Convert to tensors properly - check if already tensor or list
-            input_ids = []
-            for ex in examples:
-                if isinstance(ex, torch.Tensor):
-                    input_ids.append(ex.detach().clone())
-                else:
-                    input_ids.append(torch.tensor(ex, dtype=torch.long))
-            
-            # Pad sequences to the same length
-            max_len = max(len(seq) for seq in input_ids)
-            padded_input_ids = []
-            attention_masks = []
-            all_labels = []
-            
-            for seq in input_ids:
-                # Pad sequence
-                padding_length = max_len - len(seq)
-                padded_seq = torch.cat([seq, torch.full((padding_length,), pad_id, dtype=torch.long)])
-                
-                # Apply the chosen masking strategy to the padded sequence
-                masked_tokens, labels = masking_strategy(padded_seq)
-
-                padded_input_ids.append(masked_tokens)
-                all_labels.append(labels)
-                
-                # Create attention mask (1 for real tokens, 0 for padding)
-                attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
-                                          torch.zeros(padding_length, dtype=torch.long)])
-                attention_masks.append(attention_mask)
-            
-            # Stack into batch tensors
-            input_ids_batch = torch.stack(padded_input_ids)
-            attention_mask_batch = torch.stack(attention_masks)
-            labels_batch = torch.stack(all_labels)
-            
-            return {
-                "input_ids": input_ids_batch,
-                "attention_mask": attention_mask_batch,
-                "labels": labels_batch,
-            }
-
-    # build dynamic, token‐based training batches
-    max_tokens = config.get("max_tokens", config["block_size"] * config["batch_size"])
-    print(f"{C.BLUE}Creating DataLoader with dynamic token batching (max_tokens={max_tokens})...{C.RESET}")
-    lengths = train_ds.block_lengths
-
-    train_batch_sampler = TokenBudgetBatchSampler(
-        lengths=lengths, 
-        max_tokens=max_tokens, 
-        shuffle=True
-    )
-
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=config["batch_size"],
-        num_workers=2,  # Reduced to avoid deadlocks
-        pin_memory=True,
-        collate_fn=collate_fn,  # Use configurable masking strategy
-        prefetch_factor=2,  # Reduced prefetch factor
-        persistent_workers=False,  # Disabled to avoid multiprocessing issues
-        drop_last=True,  # optional: move drop_last here if you want strict batch shapes
-    )
-
-    print(f"  {C.GREEN}→ {len(train_loader)} train batches{C.RESET}")
-
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False,
-                               num_workers=2, pin_memory=True,
-                               collate_fn=collate_fn, drop_last=True)  # Use configurable masking for validation too
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False,
-                               num_workers=2, pin_memory=True,
-                               collate_fn=collate_fn, drop_last=True)  # Use configurable masking for test too
-
-    print(f"{C.CYAN}Data preparation complete. Train files: {len(train_paths)}, Val files: {len(val_paths)}, Test files: {len(test_paths)}{C.RESET}")
-
-    return train_loader, val_loader, test_loader, collate_fn, total_tokens_train
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Iter Data Loader Script")

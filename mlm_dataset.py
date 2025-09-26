@@ -3,6 +3,7 @@ import torch
 from torch.utils.data import Dataset
 import pickle
 import gzip
+from typing import Optional, Sequence
 
 
 def _load_chunk_sentences(chunk_path):
@@ -21,18 +22,21 @@ def _load_chunk_sentences(chunk_path):
         sentences = []
         
         # Process sentences efficiently
-        if isinstance(chunk_data, list):
-            for sentence_tokens in chunk_data:
-                if isinstance(sentence_tokens, (list, torch.Tensor)) and len(sentence_tokens) > 0:
-                    # Convert to tensor if needed
-                    if not isinstance(sentence_tokens, torch.Tensor):
-                        sentence_tokens = torch.tensor(sentence_tokens, dtype=torch.long)
-                    elif sentence_tokens.dtype != torch.long:
-                        sentence_tokens = sentence_tokens.long()
-                    
-                    # Basic validation
-                    if len(sentence_tokens) > 0:
-                        sentences.append(sentence_tokens)
+        if isinstance(chunk_data, torch.Tensor):
+            # Preblocked format: [num_rows, block_size] or [block_size]
+            if chunk_data.ndim == 2:
+                for i in range(chunk_data.size(0)):
+                    row = chunk_data[i]
+                    if row.numel() > 0:
+                        if row.dtype != torch.long:
+                            row = row.long()
+                        sentences.append(row)
+            elif chunk_data.ndim == 1 and chunk_data.numel() > 0:
+                row = chunk_data
+                if row.dtype != torch.long:
+                    row = row.long()
+                sentences.append(row)
+
         
         # Aggressive cleanup to prevent memory leaks
         del chunk_data
@@ -66,7 +70,7 @@ class Indexer:
 
 
 class AbstractMaskingStrategy:
-    def __init__(self, mask_p, tokenizer, n_special_tokens, padding_label_id=-100, random_p=0.1, keep_p=0.1, max_span_length=10):
+    def __init__(self, mask_p, tokenizer, n_special_tokens, padding_label_id=-100, random_p=0.1, keep_p=0.1, max_span_length=10, protected_ids: Optional[Sequence[int]] = None):
         self.mask_p = mask_p
         self.random_p = random_p
         self.keep_p = keep_p
@@ -75,6 +79,14 @@ class AbstractMaskingStrategy:
         self.padding_label_id = padding_label_id
         self.max_span_length = max_span_length
         self.mask_index = self.tokenizer.token_to_id("[MASK]")
+        # Optional explicit protection set (takes precedence over n_special_tokens if provided)
+        self.protected_ids_set = set(int(x) for x in protected_ids) if protected_ids else None
+        self._protected_ids_tensor = None
+        if self.protected_ids_set:
+            try:
+                self._protected_ids_tensor = torch.tensor(sorted(self.protected_ids_set), dtype=torch.long)
+            except Exception:
+                self._protected_ids_tensor = None
 
     def __call__(self, tokens):
         raise NotImplementedError()
@@ -84,8 +96,11 @@ class SubwordMaskingStrategy(AbstractMaskingStrategy):
     def __call__(self, tokens):
         labels = tokens.clone()
 
-        probability_matrix = torch.full(tokens.shape, self.mask_p)
-        special_tokens_mask = labels < self.n_special_tokens
+        probability_matrix = torch.full(tokens.shape, self.mask_p, device=tokens.device)
+        if self._protected_ids_tensor is not None:
+            special_tokens_mask = torch.isin(labels, self._protected_ids_tensor.to(tokens.device))
+        else:
+            special_tokens_mask = labels < self.n_special_tokens
         probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
 
         masked_indices = torch.bernoulli(probability_matrix).bool()
@@ -97,14 +112,23 @@ class SubwordMaskingStrategy(AbstractMaskingStrategy):
 
         # 10% of the time, we replace masked input tokens with random word
         # The rest of the time (10% of the time) we keep the masked input tokens unchanged
-        indices_random = torch.bernoulli(torch.full(labels.shape, self.random_p / (self.random_p + self.keep_p + 1e-6))).bool() & masked_indices & ~indices_replaced
-        random_words = torch.randint(
-            low=self.n_special_tokens - 1,
-            high=self.tokenizer.get_vocab_size(),
-            size=(indices_random.sum(),),
-            dtype=torch.long
-        )
-        tokens[indices_random] = random_words
+        indices_random = torch.bernoulli(torch.full(labels.shape, self.random_p / (self.random_p + self.keep_p + 1e-6), device=tokens.device)).bool() & masked_indices & ~indices_replaced
+        if indices_random.any():
+            k = int(indices_random.sum().item())
+            vocab_size = self.tokenizer.get_vocab_size()
+            if self._protected_ids_tensor is None:
+                random_words = torch.randint(low=max(self.n_special_tokens, 0), high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+            else:
+                # sample then correct protected hits once
+                random_words = torch.randint(low=0, high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+                prot = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                if prot.any():
+                    random_words[prot] = torch.randint(low=0, high=vocab_size, size=(int(prot.sum().item()),), dtype=torch.long, device=tokens.device)
+                    # any lingering protected -> set to mask
+                    prot2 = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                    if prot2.any():
+                        random_words[prot2] = self.mask_index
+            tokens[indices_random] = random_words
 
         return tokens, labels
 
@@ -115,14 +139,19 @@ class SpanMaskingStrategy(AbstractMaskingStrategy):
         # print(f"SpanMaskingStrategy called with max_span_length={self.max_span_length}") 
         labels = torch.full_like(tokens, fill_value=self.padding_label_id)
 
-        n_masked = torch.binomial((tokens >= self.n_special_tokens).float().sum(dim=0, keepdim=True), torch.FloatTensor([self.mask_p])).item()
-        preservation_mask = tokens < self.n_special_tokens
+        if self._protected_ids_tensor is not None:
+            protection_mask = torch.isin(tokens, self._protected_ids_tensor.to(tokens.device))
+            n_maskable = (~protection_mask).float().sum(dim=0, keepdim=True)
+        else:
+            protection_mask = tokens < self.n_special_tokens
+            n_maskable = (tokens >= self.n_special_tokens).float().sum(dim=0, keepdim=True)
+        n_masked = torch.binomial(n_maskable, torch.tensor([self.mask_p], device=tokens.device)).item()
         while n_masked > 0:
             span_length = torch.tensor([0]).geometric_(1/3).item() % self.max_span_length
             offset = torch.randint(-(span_length - 1), tokens.size(0) + span_length, []).item()
             mask = torch.zeros_like(tokens, dtype=torch.bool)
             mask[max(0, offset) : min(mask.size(0)-1, offset + span_length)] = True
-            mask[preservation_mask] = False
+            mask[protection_mask] = False
 
             labels = torch.where(mask, tokens, labels)
             random_p = torch.rand([]).item()
@@ -131,13 +160,20 @@ class SpanMaskingStrategy(AbstractMaskingStrategy):
             if random_p < 1.0 - self.random_p - self.keep_p:
                 tokens[mask] = self.mask_index
             elif random_p < 1.0 - self.keep_p:
-                random_words = torch.randint(
-                    low=self.n_special_tokens - 1,
-                    high=self.tokenizer.get_vocab_size(),
-                    size=(mask.sum(),),
-                    dtype=torch.long
-                )
-                tokens[mask] = random_words
+                vocab_size = self.tokenizer.get_vocab_size()
+                k = int(mask.sum().item())
+                if k > 0:
+                    if self._protected_ids_tensor is None:
+                        random_words = torch.randint(low=max(self.n_special_tokens, 0), high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+                    else:
+                        random_words = torch.randint(low=0, high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+                        prot = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                        if prot.any():
+                            random_words[prot] = torch.randint(low=0, high=vocab_size, size=(int(prot.sum().item()),), dtype=torch.long, device=tokens.device)
+                            prot2 = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                            if prot2.any():
+                                random_words[prot2] = self.mask_index
+                    tokens[mask] = random_words
 
             n_masked -= mask.sum()
 
@@ -166,7 +202,8 @@ class WholeWordMaskingStrategy(AbstractMaskingStrategy):
                 if next_word is not None:
                     words.append(next_word)
 
-                if token_id < self.n_special_tokens:
+                protected = (token_id in self.protected_ids_set) if self.protected_ids_set is not None else (token_id < self.n_special_tokens)
+                if protected:
                     next_word = None
                 else:
                     next_word = [i, i+1]
@@ -186,13 +223,20 @@ class WholeWordMaskingStrategy(AbstractMaskingStrategy):
             if random_p < 1.0 - self.random_p - self.keep_p:
                 tokens[mask] = self.mask_index
             elif random_p < 1.0 - self.keep_p:
-                random_words = torch.randint(
-                    low=self.n_special_tokens - 1,
-                    high=self.tokenizer.get_vocab_size(),
-                    size=(mask.sum(),),
-                    dtype=torch.long
-                )
-                tokens[mask] = random_words
+                vocab_size = self.tokenizer.get_vocab_size()
+                k = int(mask.sum().item())
+                if k > 0:
+                    if self._protected_ids_tensor is None:
+                        random_words = torch.randint(low=max(self.n_special_tokens, 0), high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+                    else:
+                        random_words = torch.randint(low=0, high=vocab_size, size=(k,), dtype=torch.long, device=tokens.device)
+                        prot = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                        if prot.any():
+                            random_words[prot] = torch.randint(low=0, high=vocab_size, size=(int(prot.sum().item()),), dtype=torch.long, device=tokens.device)
+                            prot2 = torch.isin(random_words, self._protected_ids_tensor.to(tokens.device))
+                            if prot2.any():
+                                random_words[prot2] = self.mask_index
+                    tokens[mask] = random_words
 
         return tokens, labels
 
@@ -411,6 +455,22 @@ class SentenceAwareDataset(Dataset):
         self.pad_token_id = self.tokenizer.token_to_id("[PAD]")
         self.mask_token_id = self.tokenizer.token_to_id("[MASK]")
         
+        # Simple on-disk cache for prebuilt sequences
+        import os
+        self._rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) or 0)
+        self._is_main = (self._rank == 0)
+        cache_dir = os.path.join(cache_path, "cache_index")
+        os.makedirs(cache_dir, exist_ok=True)
+        self._seq_cache_path = os.path.join(cache_dir, f"sentence_sequences_seq{self.seq_length}.pt")
+
+        # Fast path: load cached sequences if present
+        if os.path.exists(self._seq_cache_path):
+            if self._is_main:
+                print(f"[SentenceAwareDataset] Using cached sequences: {self._seq_cache_path}")
+            import torch
+            self.sequences = torch.load(self._seq_cache_path, map_location="cpu")
+            # Done: skip chunk scanning/sequence build
+            return
         # Load all chunk files with robust multiprocessing
         import glob
         import os
@@ -442,7 +502,7 @@ class SentenceAwareDataset(Dataset):
         
         print(f"✅ Loaded {len(self.sentences)} sentences from {len(chunk_paths)} chunks")
         
-        # Create multi-sentence sequences first
+        # After building sequences (success path)
         try:
             self.sequences = self._create_multi_sentence_sequences()
             print(f"✅ Successfully created {len(self.sequences)} sequences")
@@ -452,7 +512,19 @@ class SentenceAwareDataset(Dataset):
             print("Creating fallback individual sentence sequences...")
             self.sequences = self.sentences[:10000]  # Use first 10k sentences as sequences
             print(f"✅ Created {len(self.sequences)} fallback sequences")
-        
+
+        # Save sequences to cache (rank 0 only)
+        try:
+            if self._is_main:
+                import torch, tempfile, shutil
+                tmp_path = self._seq_cache_path + ".tmp"
+                torch.save(self.sequences, tmp_path)
+                os.replace(tmp_path, self._seq_cache_path)  # atomic on POSIX
+                print(f"[SentenceAwareDataset] Cached sequences to {self._seq_cache_path}")
+        except Exception as e:
+            if self._is_main:
+                print(f"[SentenceAwareDataset] Warning: failed to cache sequences: {e}")
+
         # EMERGENCY: Clean up sentences list to save memory AFTER sequence creation
         print("🧹 Cleaning up intermediate sentences data to save memory...")
         temp_sequences_count = len(self.sequences)
