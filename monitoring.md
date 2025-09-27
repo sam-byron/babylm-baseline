@@ -34,23 +34,39 @@ Use the CLI when you want fast, repeatable plots from one or many runs.
 ### Basic usage
 
 ```bash
-# Single run: plot training and validation loss
+# Single run: plot training (avg) and validation loss with a robust x-axis
 python scripts/plot_jsonl.py \
   --input /path/to/metrics.jsonl \
   --metrics train.loss val.loss \
+  --x-key global_step \
+  --prefer-avg \
   --out outputs/loss_curve.png
 
 # Multiple runs: compare two experiments on the same chart
 python scripts/plot_jsonl.py \
   --input /expA/metrics.jsonl /expB/metrics.jsonl \
   --metrics train.loss \
+  --x-key global_step \
   --smooth 20 \
   --out outputs/compare_train_loss.png
+
+# Make validation a connected line and further reduce noise
+python scripts/plot_jsonl.py \
+  --input /path/to/metrics.jsonl \
+  --metrics train.loss val.loss \
+  --x-key global_step \
+  --prefer-avg \
+  --force-line \
+  --downsample 50 \
+  --smooth 200 --smooth-mode centered \
+  --clip-low-pct 1 --clip-pct 99 \
+  --out outputs/loss_curve_smooth.png
 
 # Show an interactive window instead of (or in addition to) saving to a file
 python scripts/plot_jsonl.py \
   --input /path/to/metrics.jsonl \
   --metrics train.loss val.mlm_acc \
+  --x-key global_step \
   --show
 ```
 
@@ -61,22 +77,32 @@ python scripts/plot_jsonl.py \
   - `train.loss`, `train.avg_loss`
   - `val.loss`, `val.mlm_acc`
   - If your logs use slash notation (e.g., `train/loss`), pass those literal names.
-- `--x-key`: X-axis column. Defaults to `step`. If present in your logs, you can use others, like `epoch`.
-- `--smooth`: Moving average window (integer). Use `0` or omit to disable smoothing.
+- `--x-key`: X-axis column. Defaults to `step`. Use `global_step` to avoid per-epoch overlap on the x-axis.
+- `--smooth`: Moving average window (integer). Use `0` or omit to disable smoothing. See also `--smooth-mode`.
 - `--out`: Output PNG path. If omitted and `--show` is used, the plot displays without saving.
 - `--show`: Display an interactive window.
+- `--prefer-avg`: Prefer `train.avg_loss` over `train.loss` when present (less noisy).
+- `--force-line`: Force line plots (connect sparse points like validation into a continuous line).
+- `--smooth-mode`: Smoother type when `--smooth>0`. Options: `mean` (default), `centered`, `ema`, `median`.
+- `--clip-pct`, `--clip-low-pct`: Clip metric values to upper/lower percentiles (e.g., `--clip-low-pct 1 --clip-pct 99`). Useful to suppress rare spikes before smoothing.
+- `--downsample`: Downsample by x-key bin size (e.g., `--downsample 50` groups 50 adjacent points) prior to smoothing.
 
 ### Data handling details
 
-- The parser expands nested `metrics` dicts in each JSON line so you can address metrics as flat names (e.g., `train.loss`).
+- The parser expands nested `metrics` dicts in each JSON line so you can address metrics as flat names (e.g., `train.loss`). The plotter also aliases dotted and slashed names both ways (e.g., `train.loss` <-> `train/loss`, `val.loss` <-> `val/loss`).
 - If your file is empty or contains only non-metric entries, the tool will warn you.
 - When comparing multiple inputs, the legend labels are taken from file names.
+- If both `epoch` and `step` are present, choosing `--x-key global_step` computes a monotonic index across epochs to prevent overlap. The data is sorted by the selected x-key before plotting.
+- With `--prefer-avg`, the tool will map `train.loss` to `train.avg_loss` for plotting and also create a shadow column so downstream tools that expect `train.loss` still work.
 
 ### Troubleshooting
 
+- “Stripes” or steps overlapped across epochs: use `--x-key global_step`.
+- Validation points not connected: add `--force-line`.
+- Loss is too noisy: add `--prefer-avg`, increase `--smooth`, try `--smooth-mode centered` or `--smooth-mode ema`, and optionally `--downsample 50`.
+- Sharp spikes remain: clip tails before smoothing: `--clip-low-pct 1 --clip-pct 99`.
 - “Empty DataFrame provided to plot_metrics”: your file had no recognized metric columns. Ensure records contain a `metrics` object or top-level metric keys.
-- Metric names differ: inspect a few lines in the JSONL to confirm the exact keys (e.g., `train.loss` vs `train/loss`). Use those exact names with `--metrics`.
-- Very noisy curves: increase `--smooth` (e.g., 20–100) to visualize trends.
+- Metric names differ: inspect a few lines in the JSONL to confirm the exact keys (e.g., `train.loss` vs `train/loss`). The plotter aliases common dotted/slashed variants automatically.
 
 
 ## Jupyter workflow (notebooks/metrics_viewer.ipynb)

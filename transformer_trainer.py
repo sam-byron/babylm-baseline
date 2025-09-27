@@ -42,6 +42,15 @@ from training_utils import (
     safe_wait_for_everyone,
     save_once,
 )
+ 
+# ---- Lightweight JSONL logging (rank-0 only) ----
+def _append_jsonl(path: str, record: dict):
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        # Never let logging break training
+        pass
 
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
 # import os
@@ -139,6 +148,13 @@ def train_loop(
     
     # Wait for main process to finish saving tokenizer files
     safe_wait_for_everyone(accelerator, "training_loop start")
+    
+    # Prepare local metrics log (rank-0 only, no barriers)
+    is_main_global = accelerator.is_main_process
+    logs_dir = os.path.join(checkpoint_path, "logs")
+    if is_main_global:
+        os.makedirs(logs_dir, exist_ok=True)
+    metrics_path = os.path.join(logs_dir, "metrics.jsonl")
     # Use accelerator.print to avoid N prints across ranks
     accelerator.print(f"{C.BOLD}{C.CYAN}Starting training loop from epoch {start_epoch}, step {start_step} with config: {config}{C.RESET}")
     num_epochs = config["num_epochs"]
@@ -146,7 +162,7 @@ def train_loop(
         accelerator.print(f"{C.GREEN}Training already completed. Exiting.{C.RESET}")
         return
 
-    # 1) Compute number of steps and total tokens for ETA
+    # 1) Compute number of steps and total tokens for ETA (initial estimate; bars recompute per-epoch)
     steps_per_epoch = len(train_loader)
     save_steps = max(1, steps_per_epoch // 2)
     print(f"{C.BLUE}Total steps per epoch: {steps_per_epoch}, save every {save_steps} steps{C.RESET}")
@@ -262,7 +278,9 @@ def train_loop(
             
         # Main training loop - works for both resumed and normal cases
         batch_count = 0
+        last_step = None
         for step, batch in batch_iterator:
+            last_step = step
             batch_count += 1
             
             # Calculate the correct global step - simple for iterator-based skipping
@@ -309,6 +327,21 @@ def train_loop(
                     processed_batches += log_steps
                     update_progress_bars(batch_bar, loss_bar, monitor, loss_value, avg_loss, step, 
                                        log_steps, processed_batches, epoch_start, total_batches, is_main)
+                    # Rank-0 JSONL logging for train loss
+                    if is_main:
+                        now_ts = time.time()
+                        rec = {
+                            "_type": "metric",
+                            "time": now_ts,
+                            "epoch": int(epoch),
+                            "step": int(step),
+                            "train/loss": float(loss_value),
+                            "train/avg_loss": float(avg_loss),
+                            # Provide dotted aliases for alternative plotting tools
+                            "train.loss": float(loss_value),
+                            "train.avg_loss": float(avg_loss),
+                        }
+                        _append_jsonl(metrics_path, rec)
                 
                 # Save checkpoint
                 # save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C, epoch)
@@ -339,6 +372,25 @@ def train_loop(
             val_loss = accelerator.gather(val_loss).mean()
             if is_main:
                 print(f"{C.CYAN}[End-epoch] epoch {epoch+1}: avg_val_loss={val_loss:.4f} over {seen} batches{C.RESET}")
+                # Log validation loss and epoch-end marker (rank-0 only)
+                now_ts = time.time()
+                end_step = int(last_step) if last_step is not None else int(steps_per_epoch - 1)
+                rec_val = {
+                    "_type": "metric",
+                    "time": now_ts,
+                    "epoch": int(epoch + 1),
+                    "step": end_step,
+                    "val/loss": float(val_loss),
+                    "val.loss": float(val_loss),
+                }
+                _append_jsonl(metrics_path, rec_val)
+                rec_marker = {
+                    "_type": "epoch_end",
+                    "time": now_ts,
+                    "epoch": int(epoch + 1),
+                    "step": end_step,
+                }
+                _append_jsonl(metrics_path, rec_marker)
                 
         # Print epoch monitoring summary
         if is_main:
