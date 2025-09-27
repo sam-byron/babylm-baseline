@@ -38,7 +38,9 @@ from training_utils import (
     save_checkpoint,
     load_training_state,
     save_epoch_checkpoint,
-    generate_special_tokens_map
+    generate_special_tokens_map,
+    safe_wait_for_everyone,
+    save_once,
 )
 
 # # Set CUDA_HOME to avoid DeepSpeed compilation issues
@@ -76,7 +78,7 @@ def build_model(checkpoint_path, config_file, accelerator=None):
     
     # Wait for main process to finish saving config
     if accelerator is not None:
-        accelerator.wait_for_everyone()
+        safe_wait_for_everyone(accelerator, "build_model start")
     
     # Load the saved config
     transformers_config = LtgBertConfig.from_pretrained(checkpoint_path)
@@ -97,7 +99,7 @@ def build_model(checkpoint_path, config_file, accelerator=None):
     
     # Wait for main process to finish copying files
     if accelerator is not None:
-        accelerator.wait_for_everyone()
+        safe_wait_for_everyone(accelerator, "build_model end")
 
     return model
 
@@ -125,7 +127,7 @@ def train_loop(
         spike_threshold=monitoring_config.get("spike_threshold", 0.3),
         oscillation_threshold=monitoring_config.get("oscillation_threshold", 0.15)
     )
-    
+    # train_loader = val_loader
     # save tokenizer
     # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
     os.makedirs(checkpoint_path, exist_ok=True)  # Ensure directory exists
@@ -136,7 +138,7 @@ def train_loop(
     generate_special_tokens_map(tokenizer, checkpoint_path, accelerator, C)
     
     # Wait for main process to finish saving tokenizer files
-    accelerator.wait_for_everyone()
+    safe_wait_for_everyone(accelerator, "training_loop start")
     # Use accelerator.print to avoid N prints across ranks
     accelerator.print(f"{C.BOLD}{C.CYAN}Starting training loop from epoch {start_epoch}, step {start_step} with config: {config}{C.RESET}")
     num_epochs = config["num_epochs"]
@@ -278,7 +280,7 @@ def train_loop(
             with accelerator.accumulate(model):
                 with accelerator.autocast():
                     # Forward pass
-                    loss = forward_pass(model, batch)
+                    loss, logits = forward_pass(model, batch)
                     
                     # Log first batch details for debugging
                     if step == current_start_step and epoch == start_epoch:  # First resumed batch
@@ -309,7 +311,7 @@ def train_loop(
                                        log_steps, processed_batches, epoch_start, total_batches, is_main)
                 
                 # Save checkpoint
-                save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C, epoch)
+                # save_checkpoint(accelerator, model, tokenizer, checkpoint_path, step, save_steps, is_main, C, epoch)
         
         batch_bar.close()
         loss_bar.close()
@@ -332,7 +334,7 @@ def train_loop(
             # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
             seen = 0
             for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
-                val_loss = forward_pass(model, val_batch)
+                val_loss, logits = forward_pass(model, val_batch)
                 seen += 1
             val_loss = accelerator.gather(val_loss).mean()
             if is_main:
@@ -576,6 +578,7 @@ def main():
     print(f"{C.BOLD}{C.BLUE}==========================={C.RESET}\n")
     
     # train_loader = test_loader
+    save_once(accelerator, tokenizer, checkpoint_path)
     train_loop(accelerator, model, tokenizer, train_loader, val_loader, optimizer, scheduler, config, checkpoint_path, start_epoch, start_step)
 
 
