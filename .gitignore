@@ -6,3 +6,5 @@
 
 !tests/
 !auto_tests/
+!scripts/
+!src/
