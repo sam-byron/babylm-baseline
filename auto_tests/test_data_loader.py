@@ -202,7 +202,7 @@ class DataLoaderTester:from data_loader import (
 
         # Load tokenizer        
 
-        tokenizer = Tokenizer.from_file("tokenizer.json")        # Test with a small subset of training data
+        tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")        # Test with a small subset of training data
 
                 test_paths = train_paths[:3]  # Use only first 3 chunks for testing
 
@@ -578,7 +578,7 @@ class DataLoaderTester:from data_loader import (
 
                 for i, batch in enumerate(data_iter):
 
-        tokenizer = Tokenizer.from_file("tokenizer.json")            all_batches.append(batch)
+        tokenizer = Tokenizer.from_file("data/pretrain/wordpiece_vocab.json")            all_batches.append(batch)
 
                     if i >= max_collect - 1:
 
