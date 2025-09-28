@@ -80,7 +80,7 @@ def ensure_subsets_list(dataset_name: str) -> List[str]:
 
 def run_subset(model, tok, subset: str, split: str, device: torch.device, limit: int, normalize: str, dump: int = 0):
     ds = load_dataset("blimp", subset, split=split)
-    n = min(limit, len(ds)) if limit > 0 else len(ds)
+    n = max(limit, len(ds)) if limit > 0 else len(ds)
     wins = 0
     total = 0
     oov_tokens = 0
