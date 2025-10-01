@@ -64,6 +64,113 @@ def pll_score_with_tokens(model, tok, text: str, device: torch.device, normalize
         total = total / steps
     return total, contribs, enc
 
+def find_blimp_supplement_dir(explicit: Optional[str] = None) -> Optional[str]:
+    """Try to locate the BLiMP supplement JSONL folder.
+    Preference order: explicit -> ./blimp_supplement -> ../evaluation-pipeline-2024-fresh/evaluation_data/supplement_filtered
+    -> ./evaluation-pipeline-2024-fresh/evaluation_data/supplement_filtered
+    """
+    if explicit:
+        if os.path.isdir(explicit):
+            return explicit
+        # allow file path pointing to a jsonl file; use its dir
+        if os.path.isfile(explicit):
+            return os.path.dirname(os.path.abspath(explicit))
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "blimp_supplement"),
+        os.path.normpath(os.path.join(here, "..", "evaluation-pipeline-2024-fresh", "evaluation_data", "supplement_filtered")),
+        os.path.join(here, "evaluation-pipeline-2024-fresh", "evaluation_data", "supplement_filtered"),
+        os.path.join(os.getcwd(), "blimp_supplement"),
+    ]
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+    return None
+
+def get_available_supplement_tasks(supp_dir: str) -> List[str]:
+    tasks: List[str] = []
+    try:
+        for fn in os.listdir(supp_dir):
+            if fn.endswith(".jsonl"):
+                tasks.append(os.path.splitext(fn)[0])
+    except Exception:
+        pass
+    return sorted(tasks)
+
+def run_supplement_subset(
+    model,
+    tok,
+    task_name: str,
+    jsonl_path: str,
+    device: torch.device,
+    limit: int,
+    normalize: str,
+    dump: int = 0,
+):
+    """Run evaluation on a BLiMP supplement JSONL file with sentence_good/sentence_bad pairs."""
+    if not os.path.isfile(jsonl_path):
+        raise FileNotFoundError(f"Supplement file not found: {jsonl_path}")
+    rows_raw: List[Dict[str, Any]] = []
+    with open(jsonl_path, "r") as f:
+        for i, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                # must contain sentence_good/sentence_bad
+                if "sentence_good" in obj and "sentence_bad" in obj:
+                    rows_raw.append(obj)
+            except Exception:
+                continue
+            if limit > 0 and len(rows_raw) >= limit:
+                break
+
+    wins = 0
+    total = 0
+    oov_tokens = 0
+    total_tokens = 0
+    gaps: List[Tuple[float, Dict[str, Any]]] = []
+
+    for row in tqdm(rows_raw, desc=f"supplement:{task_name}"):
+        good = row["sentence_good"]
+        bad = row["sentence_bad"]
+        s_good, contrib_g, enc_g = pll_score_with_tokens(model, tok, good, device, normalize=normalize)
+        s_bad, contrib_b, enc_b = pll_score_with_tokens(model, tok, bad, device, normalize=normalize)
+        gap = s_good - s_bad
+        wins += int(gap > 0.0)
+        total += 1
+        # OOV stats
+        unk = tok.unk_token_id
+        if unk is not None and unk >= 0:
+            oov_tokens += int((enc_g["input_ids"] == unk).sum().item() + (enc_b["input_ids"] == unk).sum().item())
+        total_tokens += int(enc_g["input_ids"].numel() + enc_b["input_ids"].numel())
+        if dump > 0:
+            gaps.append((gap, {
+                "good": good,
+                "bad": bad,
+                "gap": gap,
+                "s_good": s_good,
+                "s_bad": s_bad,
+                "good_top_neg_tokens": sorted(contrib_g, key=lambda t: t[2])[:3],
+                "bad_top_pos_tokens": sorted(contrib_b, key=lambda t: -t[2])[:3],
+            }))
+
+    acc = (wins / max(1, total)) if total > 0 else 0.0
+    oov_rate = oov_tokens / max(1, total_tokens)
+    worst: List[Dict[str, Any]] = []
+    if dump > 0 and gaps:
+        worst = [info for _, info in sorted(gaps, key=lambda x: x[0])[:dump]]
+    return {
+        "task": task_name,
+        "n": total,
+        "acc": acc,
+        "oov_rate": oov_rate,
+        "normalize": normalize,
+        "examples": worst,
+        "source": os.path.basename(jsonl_path),
+    }
+
 def ensure_subsets_list(dataset_name: str) -> List[str]:
     try:
         return get_dataset_config_names(dataset_name)
@@ -137,10 +244,19 @@ def main():
     ap.add_argument("--dump", type=int, default=5, help="dump worst-K examples per subset")
     ap.add_argument("--save_csv", default="outputs/blimp_pll_report.csv")
     ap.add_argument("--save_json", default="outputs/blimp_pll_examples.jsonl")
+    # New: supplement options
+    ap.add_argument("--benchmark", default="blimp", choices=["blimp", "blimp_supplement", "both"],
+                    help="Which benchmark(s) to run")
+    ap.add_argument("--supplement_dir", default=None, help="Path to folder containing BLiMP supplement JSONL files")
+    ap.add_argument("--supplement_task", default=None, help="If set, only run this supplement task (filename without .jsonl)")
+    ap.add_argument("--supplement_save_csv", default="outputs/blimp_supplement_pll_report.csv")
+    ap.add_argument("--supplement_save_json", default="outputs/blimp_supplement_pll_examples.jsonl")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.save_csv), exist_ok=True)
     os.makedirs(os.path.dirname(args.save_json), exist_ok=True)
+    os.makedirs(os.path.dirname(args.supplement_save_csv), exist_ok=True)
+    os.makedirs(os.path.dirname(args.supplement_save_json), exist_ok=True)
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     # Prefer fast, but fall back to slow if the tokenizer.json lacks a compatible normalizer
@@ -222,43 +338,85 @@ def main():
         except Exception:
             pass
 
-    subsets = [args.subset] if args.subset else ensure_subsets_list("blimp")
-    rows = []
-    with open(args.save_json, "w") as jf:
-        for subset in subsets:
-            try:
-                split = pick_split("blimp", subset, args.split)
-            except Exception as e:
-                print(f"[WARN] Skipping {subset}: {e}")
-                continue
-            res = run_subset(model, tok, subset, split, device, args.max_examples, args.normalize, dump=args.dump)
-            rows.append(res)
-            # write dumped examples
-            for ex in res.get("examples", []):
-                jf.write(json.dumps({"subset": subset, "split": split, **ex}, ensure_ascii=False) + "\n")
-            # ADD: also write a one-line summary per subset for easy plotting
-    with open("outputs/blimp_pll_summary.jsonl", "w") as sf:
-        for r in rows:
-            sf.write(json.dumps({
-                "subset": r["subset"],
-                "split": r["split"],
-                "acc": r["acc"],
-                "oov_rate": r["oov_rate"],
-                "n": r["n"]
-            }) + "\n")
-            print(f"Subset={r['subset']:<35} split={r['split']:<10} n={r['n']:<5} PLL-acc={r['acc']:.4f}  OOV={r['oov_rate']:.2%}")
+    # Run BLiMP (HF) benchmark if requested
+    rows: List[Dict[str, Any]] = []
+    if args.benchmark in ("blimp", "both"):
+        subsets = [args.subset] if args.subset else ensure_subsets_list("blimp")
+        with open(args.save_json, "w") as jf:
+            for subset in subsets:
+                try:
+                    split = pick_split("blimp", subset, args.split)
+                except Exception as e:
+                    print(f"[WARN] Skipping {subset}: {e}")
+                    continue
+                res = run_subset(model, tok, subset, split, device, args.max_examples, args.normalize, dump=args.dump)
+                rows.append(res)
+                for ex in res.get("examples", []):
+                    jf.write(json.dumps({"subset": subset, "split": split, **ex}, ensure_ascii=False) + "\n")
+        with open("outputs/blimp_pll_summary.jsonl", "w") as sf:
+            for r in rows:
+                sf.write(json.dumps({
+                    "subset": r["subset"],
+                    "split": r["split"],
+                    "acc": r["acc"],
+                    "oov_rate": r["oov_rate"],
+                    "n": r["n"]
+                }) + "\n")
+                print(f"Subset={r['subset']:<35} split={r['split']:<10} n={r['n']:<5} PLL-acc={r['acc']:.4f}  OOV={r['oov_rate']:.2%}")
+        with open(args.save_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["subset", "split", "n", "acc", "oov_rate", "normalize"])
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r[k] for k in w.fieldnames})
+        if rows:
+            macro = sum(r["acc"] for r in rows) / len(rows)
+            print(f"\n[BLiMP Summary] subsets={len(rows)}  macro-PLL-acc={macro:.4f}  saved: {args.save_csv}, {args.save_json}")
 
-    # save CSV summary
-    with open(args.save_csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["subset", "split", "n", "acc", "oov_rate", "normalize"])
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r[k] for k in w.fieldnames})
+    # Run BLiMP supplement benchmark if requested
+    rows_sup: List[Dict[str, Any]] = []
+    if args.benchmark in ("blimp_supplement", "both"):
+        supp_dir = find_blimp_supplement_dir(args.supplement_dir)
+        if not supp_dir:
+            raise RuntimeError("Could not locate BLiMP supplement folder. Pass --supplement_dir pointing to JSONL files.")
+        tasks = [args.supplement_task] if args.supplement_task else get_available_supplement_tasks(supp_dir)
+        if not tasks:
+            raise RuntimeError(f"No supplement tasks found in {supp_dir}")
+        with open(args.supplement_save_json, "w") as jf:
+            for task in tasks:
+                fpath = os.path.join(supp_dir, f"{task}.jsonl")
+                if not os.path.isfile(fpath):
+                    print(f"[WARN] Supplement file missing, skipping: {fpath}")
+                    continue
+                res = run_supplement_subset(model, tok, task, fpath, device, args.max_examples, args.normalize, dump=args.dump)
+                rows_sup.append(res)
+                for ex in res.get("examples", []):
+                    jf.write(json.dumps({"task": task, **ex}, ensure_ascii=False) + "\n")
+        # summary + csv
+        with open("outputs/blimp_supplement_pll_summary.jsonl", "w") as sf:
+            for r in rows_sup:
+                sf.write(json.dumps({
+                    "task": r["task"],
+                    "acc": r["acc"],
+                    "oov_rate": r["oov_rate"],
+                    "n": r["n"],
+                    "source": r.get("source", "")
+                }) + "\n")
+                print(f"SuppTask={r['task']:<28} n={r['n']:<5} PLL-acc={r['acc']:.4f}  OOV={r['oov_rate']:.2%}")
+        with open(args.supplement_save_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["task", "n", "acc", "oov_rate", "normalize", "source"])
+            w.writeheader()
+            for r in rows_sup:
+                w.writerow({k: r.get(k, "") for k in w.fieldnames})
+        if rows_sup:
+            macro_sup = sum(r["acc"] for r in rows_sup) / len(rows_sup)
+            print(f"\n[BLiMP Supplement Summary] tasks={len(rows_sup)}  macro-PLL-acc={macro_sup:.4f}  saved: {args.supplement_save_csv}, {args.supplement_save_json}")
 
-    # quick overall print
-    if rows:
-        macro = sum(r["acc"] for r in rows) / len(rows)
-        print(f"\n[Summary] subsets={len(rows)}  macro-PLL-acc={macro:.4f}  saved: {args.save_csv}, {args.save_json}")
+    # quick overall print if both
+    if args.benchmark == "both":
+        total_tasks = (len(rows) if rows else 0) + (len(rows_sup) if rows_sup else 0)
+        if total_tasks:
+            macro_all = (sum(r["acc"] for r in rows) + sum(r["acc"] for r in rows_sup)) / total_tasks
+            print(f"\n[Overall] total_parts={total_tasks} macro-PLL-acc={macro_all:.4f}")
 
 if __name__ == "__main__":
     main()

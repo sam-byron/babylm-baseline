@@ -9,4 +9,4 @@
 !scripts/
 !src/
 !notebooks
-!ltgbert-glue-finetune/
+!ltgbert-glue-finetune/**
