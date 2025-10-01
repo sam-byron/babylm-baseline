@@ -236,8 +236,8 @@ def create_and_cache_splits(config):
     # Shuffle once and save the order
     random.shuffle(chunk_paths)
     
-    train_frac = config.get("train_frac", 0.85)
-    val_frac   = config.get("val_frac", 0.05)
+    train_frac = config.get("train_frac", 0.98)
+    val_frac   = config.get("val_frac", 0.01)
     
     N = len(chunk_paths)
     idx1 = int(train_frac * N)
@@ -357,23 +357,45 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
             random_p=config.get("random_p", 0.1),
             keep_p=config.get("keep_p", 0.1)
         )
-        
+
         print(f"{C.GREEN}Loaded {len(full_dataset)} sentences for sentence-aware training{C.RESET}")
-        
-        # Split the dataset
+
+        # Split the dataset (respect config fractions if provided)
         total_size = len(full_dataset)
-        train_size = int(0.85 * total_size)
-        val_size = int(0.05 * total_size)
+        train_frac = float(config.get("train_frac", 0.98))
+        val_frac = float(config.get("val_frac", 0.01))
+        # Ensure sane bounds
+        train_frac = min(max(train_frac, 0.0), 0.99)
+        val_frac = min(max(val_frac, 0.0), 1.0 - train_frac)
+        train_size = int(train_frac * total_size)
+        val_size = int(val_frac * total_size)
         test_size = total_size - train_size - val_size
-        
+
         # Create train/val/test splits
         import torch.utils.data as data
+        # Optional: reproducible split
+        gen = None
+        if "data_split_seed" in config and isinstance(config["data_split_seed"], int):
+            gen = torch.Generator()
+            gen.manual_seed(int(config["data_split_seed"]))
         train_dataset, val_dataset, test_dataset = data.random_split(
-            full_dataset, [train_size, val_size, test_size]
+            full_dataset, [train_size, val_size, test_size], generator=gen
         )
-        
+
+        # Optionally merge test into validation to increase validation stability
+        merge_test_into_val = bool(config.get("merge_test_into_val", False))
+        if merge_test_into_val and len(test_dataset) > 0:
+            # Construct a new Subset combining val and test indices
+            try:
+                combined_indices = list(val_dataset.indices) + list(test_dataset.indices)
+                val_dataset = data.Subset(full_dataset, combined_indices)
+                test_dataset = data.Subset(full_dataset, [])  # empty test
+                print(f"{C.YELLOW}merge_test_into_val=True → New val size: {len(val_dataset)}, test size: {len(test_dataset)}{C.RESET}")
+            except Exception as e:
+                print(f"{C.YELLOW}merge_test_into_val requested but failed to merge: {e}. Proceeding without merge.{C.RESET}")
+
         print(f"{C.CYAN}Dataset splits → train: {len(train_dataset)}, val: {len(val_dataset)}, test: {len(test_dataset)}{C.RESET}")
-        
+
         # Always use dynamic masking for sentence-aware mode for now
         from dynamic_collator import create_dynamic_collator
         base_collate = create_dynamic_collator(config, tokenizer)
@@ -387,7 +409,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
                 else:
                     seqs.append(item)
             return base_collate(seqs)
-        
+
         # Create data loaders
         train_loader = DataLoader(
             train_dataset,
@@ -398,7 +420,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
             collate_fn=sentence_dynamic_collate_fn,
             drop_last=True,
         )
-        
+
         val_loader = DataLoader(
             val_dataset,
             batch_size=config["batch_size"],
@@ -408,7 +430,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
             collate_fn=sentence_dynamic_collate_fn,
             drop_last=True,
         )
-        
+
         test_loader = DataLoader(
             test_dataset,
             batch_size=config["batch_size"],
@@ -418,7 +440,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
             collate_fn=sentence_dynamic_collate_fn,
             drop_last=True,
         )
-        
+
         # Compute total tokens precisely (train split)
         if hasattr(full_dataset, "sequences") and hasattr(train_dataset, "indices"):
             # Fast path: sum lengths directly from underlying storage using subset indices
@@ -431,13 +453,13 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
                 seq = item['input_ids'] if isinstance(item, dict) else item
                 total_tokens_train += int(len(seq))
             avg_sentence_length = total_tokens_train / max(1, len(train_dataset))
-        
+
         print(f"{C.GREEN}Sentence-aware data loaders created successfully{C.RESET}")
         print(f"{C.CYAN}Average sentence length: {avg_sentence_length:.1f} tokens{C.RESET}")
         print(f"{C.CYAN}Total training tokens (exact): {total_tokens_train:,}{C.RESET}")
-        
+
         return train_loader, val_loader, test_loader, sentence_dynamic_collate_fn, total_tokens_train
-        
+
     except Exception as e:
         print(f"{C.RED}Error creating sentence-aware dataset: {e}{C.RESET}")
 
