@@ -9,6 +9,7 @@ from transformers import BertConfig
 from torch.optim import AdamW
 from tqdm import tqdm
 from accelerate import Accelerator, DataLoaderConfiguration
+from accelerate.utils import DistributedDataParallelKwargs
 # from iter_data_loader import iter_data_loader
 from data_loader import data_loader
 import argparse
@@ -360,29 +361,51 @@ def train_loop(
         print(f"{C.YELLOW}Epoch {epoch+1} checkpoint saved, ready to progress to epoch {epoch+2}{C.RESET}")
         print(f"{C.DIM}Training state will be saved as: epoch={epoch+1}, step=0{C.RESET}")
         
-        # Run validation only on main process with unprepared loader
+        # Run validation only on main process with unprepared loader (avoid barriers)
         model.eval()
+        
         with torch.no_grad():
-            # randomize the validation loader to sample different batches each time
-            # shuffled_val_loader = torch.utils.data.RandomSampler(val_loader)
             seen = 0
-            for val_batch in tqdm(val_loader, desc="Validating (sample)", disable=not is_main):
+            val_total = 0.0
+            val_weight = 0
+            total_masked = 0
+            for val_batch in tqdm(val_loader, desc="Validating (full)", disable=not is_main):
                 val_loss, logits = forward_pass(model, val_batch)
+                val_loss = accelerator.gather(val_loss).mean()
+                # Weight by number of masked tokens when available to reduce variance
+                try:
+                    labels = val_batch.get("labels") if isinstance(val_batch, dict) else None
+                    labels = accelerator.gather(labels) if labels is not None else None
+                    if labels is not None:
+                        masked = (labels != -100)
+                        accelerator.gather(masked)
+                        weight = int(masked.sum().item())
+                    else:
+                        weight = 0
+                except Exception:
+                    weight = 0
+                if weight <= 0:
+                    weight = 1
+                val_total += float(val_loss) * weight
+                val_weight += weight
+                total_masked += max(0, weight)
                 seen += 1
-            val_loss = accelerator.gather(val_loss).mean()
+            avg_val_loss = val_total / max(1, val_weight)
+            print(f"{C.CYAN}[End-epoch] epoch {epoch+1}: avg_val_loss={avg_val_loss:.4f} over {seen} batches (masked tok={total_masked}){C.RESET}")
+            # Log validation loss and epoch-end marker (rank-0 only)
+            now_ts = time.time()
+            end_step = int(last_step) if last_step is not None else int(steps_per_epoch - 1)
+            rec_val = {
+                "_type": "metric",
+                "time": now_ts,
+                "epoch": int(epoch + 1),
+                "step": end_step,
+                "val/loss": float(avg_val_loss),
+                "val.loss": float(avg_val_loss),
+                "val.batches": int(seen),
+                "val.masked_tokens": int(total_masked),
+            }
             if is_main:
-                print(f"{C.CYAN}[End-epoch] epoch {epoch+1}: avg_val_loss={val_loss:.4f} over {seen} batches{C.RESET}")
-                # Log validation loss and epoch-end marker (rank-0 only)
-                now_ts = time.time()
-                end_step = int(last_step) if last_step is not None else int(steps_per_epoch - 1)
-                rec_val = {
-                    "_type": "metric",
-                    "time": now_ts,
-                    "epoch": int(epoch + 1),
-                    "step": end_step,
-                    "val/loss": float(val_loss),
-                    "val.loss": float(val_loss),
-                }
                 _append_jsonl(metrics_path, rec_val)
                 rec_marker = {
                     "_type": "epoch_end",
@@ -408,7 +431,22 @@ def train_loop(
 
 def main():
     print(torch._dynamo.list_backends())
-    
+
+    # Fast kernels (safe on Ampere+; no effect otherwise)
+    if bool(os.environ.get("ALLOW_TF32", "1") == "1"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+        try:
+            from torch.nn.attention import sdp_kernel
+            # Prefer flash if available, fallback to mem_efficient
+            sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True)
+        except Exception:
+            pass
+
     # 2) pin this process to the correct CUDA device
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if torch.cuda.is_available():
@@ -425,17 +463,18 @@ def main():
     with open(args.config_path, "r") as config_file:
         config = json.load(config_file)
 
-    # Add gradient accumulation and mixed precision - more conservative for custom models
+    # DDP speed-ups
+    ddp_kwargs = DistributedDataParallelKwargs(
+        static_graph=True,                 # fixed graph speeds up allreduce
+        gradient_as_bucket_view=True,      # lower memory + faster
+        find_unused_parameters=False,
+    )
+
     accelerator = Accelerator(
-        mixed_precision="bf16",  # Use bf16 for better stability and performance
-        # mixed_precision="fp16",  # Use fp16 instead of bf16 for better compatibility
+        mixed_precision="bf16",
         gradient_accumulation_steps=config["grad_accum"],
-        dataloader_config=DataLoaderConfiguration(
-            even_batches=True,
-            split_batches=False,  # Don't split batches across devices
-        ),
-        # Add more conservative settings for custom models
-        # dispatch_batches=False,  # Disable batch dispatching
+        dataloader_config=DataLoaderConfiguration(even_batches=True, split_batches=False),
+        # kwargs_handlers=[ddp_kwargs],
     )
 
     checkpoint_path = os.path.join(config["cache_path"], "checkpoint")
@@ -454,6 +493,12 @@ def main():
 
     # if accelerator.is_main_process:
     #     print(f"{C.BLUE}LR base={base_lr:.2e} scaled={scaled_lr:.2e} (effective_bs={effective_bs}){C.RESET}")
+
+    # Load the saved epoch and step from training state EARLY to align scheduler on restarts
+    start_epoch, start_step = load_training_state(checkpoint_path)
+    print(f"\n{C.BOLD}{C.BLUE}=== TRAINING STATE (pre-opt/sched) ==={C.RESET}")
+    print(f"{C.BLUE}Loaded training state: epoch={start_epoch}, step={start_step}{C.RESET}")
+    print(f"{C.BOLD}{C.BLUE}======================================{C.RESET}\n")
 
     # --- Effective batch & conservative late-stage scaling ---
     base_lr    = float(config.get("learning_rate", 1e-4))    # sensible default for BERT-base-ish late training
@@ -487,11 +532,10 @@ def main():
     optim_eps = float(config.get("optimizer_eps", 1e-8))
     betas = (0.9, 0.999)
 
-    # Prefer fused AdamW if available (PyTorch 2+)
+    # --- Optimizer selection (prefer fused AdamW for speed) ---
     use_fused = bool(config.get("use_fused_adamw", True))
+    use_foreach = True
     adamw_cls = torch.optim.AdamW
-    if use_fused and hasattr(torch.optim, "adamw") and "fused" in adamw_cls.__init__.__code__.co_varnames:
-        pass  # torch.optim.AdamW supports fused=True in recent PyTorch
     param_groups = [
         {"params": decay_params,   "weight_decay": weight_decay, "lr": scaled_lr},
         {"params": nodecay_params, "weight_decay": 0.0,          "lr": scaled_lr},
@@ -503,8 +547,9 @@ def main():
     # Make sure you compute these with the *true* number of batches and grad_accum
     num_train_batches = len(train_loader)
     updates_per_epoch = math.ceil(num_train_batches / max(1, grad_accum))
-    already_done_updates = int(config.get("global_update_step", 0))  # set from checkpoint if resuming
-    total_updates = int(config.get("num_epochs", 30)) * updates_per_epoch - already_done_updates
+    # Derive resume progress in optimizer-update units from saved state
+    resume_updates = (start_epoch * updates_per_epoch) + (start_step // max(1, grad_accum))
+    total_updates = int(config.get("num_epochs", 30)) * updates_per_epoch
 
     warmup_prop = float(config.get("warmup_steps_proportion", 0.06))
     warmup_updates = max(1, int(warmup_prop * total_updates))
@@ -519,8 +564,6 @@ def main():
         t = (step - warmup_updates) / max(1, total_updates - warmup_updates)
         # cosine from 1.0 -> floor_ratio
         return floor_ratio + 0.5 * (1.0 - floor_ratio) * (1.0 + math.cos(math.pi * t))
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # --- Gradient clipping: engage earlier to stop "near explosion" warnings ---
     max_grad_norm = float(config.get("max_grad_norm", 1.0))  # ↓ from 1.5
@@ -582,8 +625,18 @@ def main():
         print(f"{C.BOLD}{C.CYAN}=========================={C.RESET}", flush=True)
         # —––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 
-    # Ensure the scheduler is part of the checkpoint state
-    accelerator.register_for_checkpointing(scheduler)
+    # Build LR scheduler attached to the prepared optimizer.
+    # Use last_epoch=-1 to seed 'initial_lr' in param groups; then optionally jump to resume position.
+    from torch.optim.lr_scheduler import LambdaLR
+    scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+
+    # Decide whether to reinitialize scheduler state on restart
+    reinit_scheduler = bool(config.get("reinitialize_scheduler", True))
+
+    # If we want to reinitialize the scheduler, delay registering it until after load_state
+    if not reinit_scheduler:
+        # Ensure the scheduler is part of the checkpoint state
+        accelerator.register_for_checkpointing(scheduler)
 
     if checkpoint_path and os.path.isdir(checkpoint_path) and os.listdir(checkpoint_path):
         try:
@@ -610,8 +663,12 @@ def main():
     else:
         accelerator.print(f"{C.YELLOW}No checkpoint found at {checkpoint_path}, starting from scratch.{C.RESET}")
 
-    # Load the saved epoch and step from training state
-    start_epoch, start_step = load_training_state(checkpoint_path)
+    # After potential state load, if we reinitialized the scheduler, align and register it now
+    if reinit_scheduler:
+        # Advance scheduler to the resume position in optimizer-update units
+        if resume_updates > 0:
+            scheduler.step(resume_updates)
+        accelerator.register_for_checkpointing(scheduler)
     
     print(f"\n{C.BOLD}{C.BLUE}=== TRAINING STATE DEBUG ==={C.RESET}")
     print(f"{C.BLUE}Loaded training state: epoch={start_epoch}, step={start_step}{C.RESET}")
