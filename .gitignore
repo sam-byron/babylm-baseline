@@ -4,9 +4,15 @@
 # Ignore all folders (alternative syntax)
 **/
 
+accelerate_config.yaml
+
 !tests/
 !auto_tests/
 !scripts/
 !src/
 !notebooks
-!ltgbert-glue-finetune/**
+!glue-finetune/src/
+!glue-finetune/run_finetune.sh
+!glue-finetune/README.md
+!glue-finetune/requirements.txt
+
