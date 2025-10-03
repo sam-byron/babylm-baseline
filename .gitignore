@@ -1,18 +1,48 @@
-# Ignore all directories
-*/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Ignore all folders (alternative syntax)
-**/
+# Environment
+.env
+env/
+venv/
 
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Config
 accelerate_config.yaml
 
-!tests/
-!auto_tests/
-!scripts/
-!src/
-!notebooks
-!glue-finetune/src/
-!glue-finetune/run_finetune.sh
-!glue-finetune/README.md
-!glue-finetune/requirements.txt
+backup/
 
+glue-finetune/configs
+glue-finetune/fine-tuned-ltg-bert-glue
+
+model_vault/
+
+temp/
+
+data/
+
+blimp_data/
+blimp_supplement/
+
+configs/
+
+.vscode/
+
+glue_training/
+
+model_babylm_bert_ltg/
+
+test_models/
+
+outputs/

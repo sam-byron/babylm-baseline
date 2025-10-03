@@ -12,8 +12,6 @@ import random
 # from datasets import load_dataset, Dataset, concatenate_datasets, load_from_disk
 from functools import partial
 # Legacy concatenation path retained for reference, but we now implement direct block writer
-from utils_mp import process_and_save_chunk as legacy_process_and_save_chunk
-# from utils import tokenize_sample, process_and_save_chunk
 from multiprocessing import Pool
 import torch
 import multiprocessing as mp
