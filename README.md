@@ -4,6 +4,16 @@ This repository contains a lightweight, compute-conscious pipeline to prepare th
 
 Each script below includes purpose, how to call it, important arguments, and what’s innovative or efficient.
 
+# Benchmark Results
+
+BLIMP: 75%. An increase of 2% over the best baseline.
+BLIMP supplement: 68%. An increase of 1.5% over the best baseline.
+EWOK: 56%. An increase of 4% over the best baseline.
+GLUE: 75%. An increase of 6% over the best baseline.
+Total Score: 68.75%. An increase of 4.75% over the best baseline.
+
+(*) Best baseline submitted to 2024 babylm competition.
+
 ## Data collection and conversion
 
 - collect_xml.sh
@@ -172,3 +182,8 @@ python blimp_sanity.py --model_path model_vault/model_bl_bert_ltgds_regular --be
 ---
 
 If you want these docs rendered as a docs site or consolidated into a single handbook, we can extract per-file sections and generate a mkdocs or Sphinx site on request.
+
+# Citations:
+Trained on 100 million words and still in shape:
+BERT meets British National Corpus
+David Samuel, Andrey Kutuzov, Lilja Øvrelid and Erik Vellda
