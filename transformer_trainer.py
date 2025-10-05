@@ -1,6 +1,4 @@
 import os
-import subprocess
-import sys
 import torch
 import json
 import math
@@ -10,15 +8,12 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.utils import DistributedDataParallelKwargs
-# from iter_data_loader import iter_data_loader
 from data_loader import data_loader
 import argparse
 import time
 import torch.distributed as dist
 import traceback
 from datetime import timedelta
-# import torch.distributed as dist
-from config import BertConfig
 from training_monitor import TrainingMonitor
 
 from modeling_ltgbert import LtgBertForMaskedLM
@@ -36,7 +31,6 @@ from training_utils import (
     forward_pass, 
     gradient_step, 
     update_progress_bars, 
-    save_checkpoint,
     load_training_state,
     save_epoch_checkpoint,
     generate_special_tokens_map,
@@ -52,13 +46,6 @@ def _append_jsonl(path: str, record: dict):
     except Exception:
         # Never let logging break training
         pass
-
-# # Set CUDA_HOME to avoid DeepSpeed compilation issues
-# import os
-# os.environ.setdefault('CUDA_HOME', '/usr/local/cuda-12.9')
-# # Disable DeepSpeed compilation since we don't have nvcc
-# os.environ.setdefault('DS_BUILD_OPS', '0')
-# os.environ.setdefault('DS_SKIP_CUDA_CHECK', '1')
 
 # ===== Simple ANSI color helper =====
 class C:
@@ -137,8 +124,7 @@ def train_loop(
         spike_threshold=monitoring_config.get("spike_threshold", 0.3),
         oscillation_threshold=monitoring_config.get("oscillation_threshold", 0.15)
     )
-    # train_loader = val_loader
-    # save tokenizer
+
     # Save tokenizer manually since our custom tokenizer doesn't have save_pretrained
     os.makedirs(checkpoint_path, exist_ok=True)  # Ensure directory exists
     tokenizer_dest = os.path.join(checkpoint_path, "tokenizer.json")
@@ -169,8 +155,6 @@ def train_loop(
     print(f"{C.BLUE}Total steps per epoch: {steps_per_epoch}, save every {save_steps} steps{C.RESET}")
     if start_step > 0:
         print(f"{C.CYAN}Resuming from step {start_step} within epoch {start_epoch+1}{C.RESET}")
-    # val_log_steps = max(1, steps_per_epoch // 200)
-    # print(f"{C.BLUE}Validation every {val_log_steps} steps{C.RESET}")
 
     for epoch in range(start_epoch, num_epochs):
         print(f"\n{C.BOLD}{C.MAGENTA}={'='*60}{C.RESET}")
@@ -353,9 +337,7 @@ def train_loop(
         print(f"\n{C.GREEN}✓ Completed epoch {epoch+1}/{num_epochs}{C.RESET}")
         print(f"{C.CYAN}Total batches processed: {total_batches}{C.RESET}")
         
-        # End‑of‑epoch checkpoint (main-only, with barriers)
-        # accelerator.wait_for_everyone()
-        # if accelerator.is_main_process:
+        # End‑of‑epoch checkpoint
         save_epoch_checkpoint(accelerator, model, tokenizer, checkpoint_path, epoch, is_main, C)
         
         print(f"{C.YELLOW}Epoch {epoch+1} checkpoint saved, ready to progress to epoch {epoch+2}{C.RESET}")
@@ -423,10 +405,6 @@ def train_loop(
                 print(f"{C.YELLOW}⚠️  Training stability issues detected this epoch. Consider reducing learning rate if issues persist.{C.RESET}")
                 
         model.train()
-    
-        # Wait for main process to finish validation before continuing
-        # accelerator.wait_for_everyone()
-        # accelerator.wait_for_everyone()
 
 
 def main():
@@ -463,18 +441,10 @@ def main():
     with open(args.config_path, "r") as config_file:
         config = json.load(config_file)
 
-    # DDP speed-ups
-    ddp_kwargs = DistributedDataParallelKwargs(
-        static_graph=True,                 # fixed graph speeds up allreduce
-        gradient_as_bucket_view=True,      # lower memory + faster
-        find_unused_parameters=False,
-    )
-
     accelerator = Accelerator(
         mixed_precision="bf16",
         gradient_accumulation_steps=config["grad_accum"],
         dataloader_config=DataLoaderConfiguration(even_batches=True, split_batches=False),
-        # kwargs_handlers=[ddp_kwargs],
     )
 
     checkpoint_path = os.path.join(config["cache_path"], "checkpoint")
@@ -485,14 +455,6 @@ def main():
     print(f"{C.GREEN}Data loaders created successfully{C.RESET}")
     # Build the GPT-2 model from scratch based on our config
     model = build_model(checkpoint_path, args.config_path, accelerator)
-    
-    # # Enable gradient checkpointing for memory efficiency but comes at a speed penalty of 15-20%s
-    # if hasattr(model, 'gradient_checkpointing_enable'):
-    #     model.gradient_checkpointing_enable()
-    #     print(f"{C.BLUE}Enabled gradient checkpointing for memory efficiency{C.RESET}")
-
-    # if accelerator.is_main_process:
-    #     print(f"{C.BLUE}LR base={base_lr:.2e} scaled={scaled_lr:.2e} (effective_bs={effective_bs}){C.RESET}")
 
     # Load the saved epoch and step from training state EARLY to align scheduler on restarts
     start_epoch, start_step = load_training_state(checkpoint_path)
@@ -564,9 +526,6 @@ def main():
         t = (step - warmup_updates) / max(1, total_updates - warmup_updates)
         # cosine from 1.0 -> floor_ratio
         return floor_ratio + 0.5 * (1.0 - floor_ratio) * (1.0 + math.cos(math.pi * t))
-
-    # --- Gradient clipping: engage earlier to stop "near explosion" warnings ---
-    max_grad_norm = float(config.get("max_grad_norm", 1.0))  # ↓ from 1.5
     
     if config.get("optimizer", "adamw").lower() == "lamb":
         print(f"{C.BLUE}Using LAMB optimizer with robust param grouping{C.RESET}")

@@ -169,7 +169,7 @@ def prepare_data(config, tokenizer, cache_path, sentence_pack=False):
     print("[SentencePack] Collecting raw lines for packing (always-on)...")
     raw_lines = []
     packed_results = []
-    names = load_first_names(("./first-names.txt"))  # currently unused but retained for future inline speaker tagging
+    names = load_first_names(("./data/first-names.txt"))  # currently unused but retained for future inline speaker tagging
     debug_max = config.get("debug_max_raw_lines")
     line_counter = 0
     doc_counter = 0

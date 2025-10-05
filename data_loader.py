@@ -212,122 +212,6 @@ class ChunkedDataset(Dataset):
                 block = block.long()
             return block
 
-
-def create_and_cache_splits(config):
-    """Create train/val/test splits once and cache them."""
-    
-    cache_path = config["cache_path"]
-    # Create splits directory
-    splits_dir = Path(cache_path) / "splits"
-    splits_dir.mkdir(exist_ok=True)
-    
-    # Check if splits already exist
-    splits_file = splits_dir / "dataset_splits.json"
-    if splits_file.exists():
-        print(f"{C.CYAN}Dataset splits already exist, loading cached splits...{C.RESET}")
-        with open(splits_file, 'r') as f:
-            splits = json.load(f)
-        return splits['train_paths'], splits['val_paths'], splits['test_paths']
-    
-    # Create new splits
-    print(f"{C.BLUE}Creating new dataset splits...{C.RESET}")
-    chunk_paths = sorted(glob.glob(os.path.join(cache_path, "chunk*.pt")))
-    
-    # Shuffle once and save the order
-    random.shuffle(chunk_paths)
-    
-    train_frac = config.get("train_frac", 0.98)
-    val_frac   = config.get("val_frac", 0.01)
-    
-    N = len(chunk_paths)
-    idx1 = int(train_frac * N)
-    idx2 = int((train_frac + val_frac) * N)
-
-    train_paths = chunk_paths[:idx1]
-    val_paths   = chunk_paths[idx1:idx2]
-    test_paths  = chunk_paths[idx2:]
-    
-    # Cache the splits
-    splits = {
-        'train_paths': train_paths,
-        'val_paths': val_paths,
-        'test_paths': test_paths,
-        'created_at': str(datetime.now()),
-        'config': {
-            'train_frac': train_frac,
-            'val_frac': val_frac,
-            'total_chunks': N
-        }
-    }
-    
-    with open(splits_file, 'w') as f:
-        json.dump(splits, f, indent=2)
-    
-    print(f"{C.GREEN}Cached dataset splits to {splits_file}{C.RESET}")
-    print(f"{C.CYAN}Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}{C.RESET}")
-    
-    return train_paths, val_paths, test_paths
-
-class TokenBudgetBatchSampler(BatchSampler):
-    """
-    A BatchSampler that creates batches of indices where the total number of
-    tokens (based on sample lengths) does not exceed a specified budget.
-
-    To minimize padding and wasted computation, it sorts samples by length
-    before creating batches.
-    """
-    def __init__(self, lengths: List[int], max_tokens: int, shuffle: bool = True):
-        """
-        Args:
-            lengths: A list of integers representing the length of each sample
-                     in the dataset.
-            max_tokens: The maximum number of tokens allowed in a single batch.
-            shuffle: If True, the order of batches is shuffled at the beginning
-                     of each epoch.
-        """
-        if not isinstance(lengths, list) or not all(isinstance(l, int) for l in lengths):
-            raise TypeError("lengths must be a list of integers.")
-        if not isinstance(max_tokens, int) or max_tokens <= 0:
-            raise ValueError("max_tokens must be a positive integer.")
-
-        self.lengths = lengths
-        self.max_tokens = max_tokens
-        self.shuffle = shuffle
-        self.batches = self._create_batches()
-
-    def _create_batches(self) -> List[List[int]]:
-        # Create a list of (index, length) tuples and sort by length
-        indices_with_lengths = sorted(enumerate(self.lengths), key=lambda x: x[1])
-
-        batches = []
-        current_batch = []
-        current_token_count = 0
-
-        for index, length in indices_with_lengths:
-            if length > self.max_tokens:
-                print(f"{C.YELLOW}Warning: Sample {index} with length {length} is larger than max_tokens {self.max_tokens} and will be skipped.{C.RESET}")
-                continue
-
-            if current_token_count + length > self.max_tokens and current_batch:
-                batches.append(current_batch)
-                current_batch = []
-                current_token_count = 0
-
-            current_batch.append(index)
-            current_token_count += length
-
-        if current_batch:
-            batches.append(current_batch)
-        return batches
-
-    def __iter__(self) -> Iterator[List[int]]:
-        if self.shuffle:
-            random.shuffle(self.batches)
-        yield from self.batches
-
-    def __len__(self) -> int:
-        return len(self.batches)
-
 # Update the data_loader function to use sentence-aware dataset when available
 def data_loader(config, tokenizer, cache_path):
     block_size = config["block_size"]
@@ -362,7 +246,7 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
 
         # Split the dataset (respect config fractions if provided)
         total_size = len(full_dataset)
-        train_frac = float(config.get("train_frac", 0.98))
+        train_frac = float(config.get("train_frac", 0.5))
         val_frac = float(config.get("val_frac", 0.01))
         # Ensure sane bounds
         train_frac = min(max(train_frac, 0.0), 0.99)
@@ -462,19 +346,3 @@ def _create_sentence_aware_loader(config, tokenizer, cache_path):
 
     except Exception as e:
         print(f"{C.RED}Error creating sentence-aware dataset: {e}{C.RESET}")
-
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Iter Data Loader Script")
-    parser.add_argument("--config_path", type=str, required=True, help="Path to the configuration file")
-    args = parser.parse_args()
-
-    with open(args.config_path, "r") as config_file:
-        config = json.load(config_file)
-
-    block_size = config["block_size"]
-    batch_size = config["batch_size"]
-
-    # Load or create cached splits
-    train_paths, val_paths, test_paths = create_and_cache_splits(config)

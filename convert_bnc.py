@@ -21,7 +21,7 @@ def capitalize(s):
     return s[0].upper() + s[1:]
 
 
-with open("temp/first-names.txt") as f:
+with open("./data/first-names.txt") as f:
     first_names = [capitalize(name.strip()) for name in f.readlines() if name.strip().isalpha()]
 
 
