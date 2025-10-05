@@ -6,13 +6,13 @@ Each script below includes purpose, how to call it, important arguments, and wha
 
 # Benchmark Results
 
-BLIMP: 75%. An increase of 2% over the best baseline.
-BLIMP supplement: 68%. An increase of 1.5% over the best baseline.
-EWOK: 56%. An increase of 4% over the best baseline.
-GLUE: 75%. An increase of 6% over the best baseline.
-Total Score: 68.75%. An increase of 4.75% over the best baseline.
+- BLIMP: 75%. An increase of 2% over the best baseline.
+- BLIMP supplement: 68%. An increase of 1.5% over the best baseline.
+- EWOK: 56%. An increase of 4% over the best baseline.
+- GLUE: 75%. An increase of 6% over the best baseline.
+- Total Score: 68.75%. An increase of 4.75% over the best baseline.
 
-(*) Best baseline submitted to 2024 babylm competition.
+- (*) Best baseline submitted to 2024 babylm competition.
 
 ## Data collection and conversion
 
