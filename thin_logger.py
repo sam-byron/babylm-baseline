@@ -1,3 +1,10 @@
+"""
+Thin JSONL/TensorBoard logger used during training and evaluation.
+
+This logger is backend-neutral and safe to use in distributed settings: methods
+are no-ops on non-main ranks when constructed with is_main=False.
+"""
+
 import os
 import json
 import time

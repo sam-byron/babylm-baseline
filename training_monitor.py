@@ -1,8 +1,22 @@
-"""Training monitoring utilities for stability detection and analysis."""
+"""
+Training monitoring utilities for stability detection and analysis.
+
+The TrainingMonitor tracks loss, gradient norm, and learning rate over time and provides
+simple detectors for common instability symptoms:
+- Loss spikes: large relative jump between consecutive steps
+- Oscillation: high std/mean of loss over a sliding window
+- Gradient explosions: norms approaching the clipping threshold
+"""
 
 
 class TrainingMonitor:
-    """Monitor training stability and detect issues"""
+    """Monitor training stability and detect issues.
+
+    Args:
+        window_size (int): Sliding window size for oscillation detection.
+        spike_threshold (float): Relative increase to flag a spike, e.g., 0.5 == +50%.
+        oscillation_threshold (float): Std/mean threshold to flag oscillations.
+    """
     def __init__(self, window_size=20, spike_threshold=0.5, oscillation_threshold=0.1):
         self.window_size = window_size
         self.spike_threshold = spike_threshold  # Relative increase that counts as a spike
@@ -17,7 +31,7 @@ class TrainingMonitor:
         self.explosion_count = 0
         
     def update(self, loss, grad_norm, lr, step):
-        """Update monitoring with new values"""
+        """Append latest measurements to the history buffers."""
         self.loss_history.append(loss)
         self.grad_norm_history.append(grad_norm)
         self.lr_history.append(lr)
@@ -29,7 +43,7 @@ class TrainingMonitor:
             self.lr_history = self.lr_history[-self.window_size:]
     
     def check_loss_spike(self):
-        """Detect sudden loss increases"""
+        """Detect a sudden loss increase between consecutive steps."""
         if len(self.loss_history) < 3:
             return False, ""
             
@@ -42,7 +56,7 @@ class TrainingMonitor:
         return False, ""
     
     def check_oscillation(self):
-        """Detect loss oscillation in recent window"""
+        """Detect loss oscillation in the recent window using std/mean ratio."""
         if len(self.loss_history) < self.window_size:
             return False, ""
             
@@ -57,7 +71,7 @@ class TrainingMonitor:
         return False, ""
     
     def check_gradient_explosion(self, max_grad_norm=1.0):
-        """Detect gradient explosion"""
+        """Detect gradient norms near the clipping threshold (possible explosion)."""
         if len(self.grad_norm_history) < 2:
             return False, ""
             
@@ -68,7 +82,7 @@ class TrainingMonitor:
         return False, ""
     
     def get_stats(self):
-        """Get monitoring statistics"""
+        """Return a compact string summary of recent values and issue counters."""
         if not self.loss_history:
             return "No data yet"
             

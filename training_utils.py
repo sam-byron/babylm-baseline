@@ -1,3 +1,18 @@
+"""
+Training utilities for LTG-BERT
+
+This module contains small helpers used by the training loop:
+- safe_wait_for_everyone: device-safe barrier for DDP/Accelerate
+- generate_special_tokens_map: write special_tokens_map.json based on tokenizer contents
+- forward_pass: run a masked-LM forward consistent with model's attention mask handling
+- gradient_step: compute grad norm, monitor stability, clip, and step optimizer/scheduler
+- update_progress_bars: update TQDM bars with speed and monitoring stats
+- save_*: helpers to save/checkpoint in Hugging Face-compatible format
+- build_batch_iterator_with_skip: efficiently skip to a batch index when resuming
+
+Behavior is unchanged; only documentation is added for clarity.
+"""
+
 import torch
 import json
 import os
@@ -8,7 +23,7 @@ from pathlib import Path
 import torch.distributed as dist
 
 # Add a PG-safe barrier that pins the device id for NCCL
-def safe_wait_for_everyone(accelerator, note=""):
+def safe_wait_for_everyone(accelerator, note: str = ""):
     try:
         if dist.is_available() and dist.is_initialized():
             if torch.cuda.is_available():
@@ -26,7 +41,7 @@ def safe_wait_for_everyone(accelerator, note=""):
         if accelerator is not None and getattr(accelerator, "is_main_process", True):
             print(f"[safe_barrier] fallback at {note}: {e}")
 
-def generate_special_tokens_map(tokenizer, checkpoint_path, accelerator=None, C=None):
+def generate_special_tokens_map(tokenizer, checkpoint_path: str, accelerator=None, C=None):
     """
     Auto-generate special_tokens_map.json for AutoTokenizer compatibility.
     

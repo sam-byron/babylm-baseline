@@ -1,7 +1,32 @@
+"""
+Layer-wise Adaptive Moments optimizer (LAMB)
+
+This is a minimal PyTorch implementation of the LAMB optimizer commonly used for large-batch
+training. It extends Adam with a layer-wise trust ratio computed as ||w|| / ||update|| which
+stabilizes training when scaling batch sizes.
+
+Notes and limitations
+- Sparse gradients are not supported (matches common reference implementations).
+- Weight decay is applied in a decoupled AdamW-style manner via adding to the update.
+- Trust ratio falls back to 1.0 when either weight or update norms are zero.
+
+References
+- You, Zhang, Hsieh, Demmel, Keutzer (2019): Large Batch Optimization for Deep Learning: Training BERT in 76 minutes.
+"""
+
 import torch
 
 
 class Lamb(torch.optim.Optimizer):
+    """PyTorch Optimizer implementing LAMB.
+
+    Args:
+        params: Iterable of parameters to optimize.
+        lr (float): Learning rate.
+        betas (tuple[float, float]): Exponential averaging coefficients for moments.
+        eps (float): Numerical stability epsilon.
+        weight_decay (float): Decoupled L2 weight decay coefficient.
+    """
     def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-6, weight_decay=0):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
@@ -16,6 +41,11 @@ class Lamb(torch.optim.Optimizer):
         super(Lamb, self).__init__(params, defaults)
 
     def step(self, closure=None):
+        """Performs a single optimization step.
+
+        Returns:
+            Optional[torch.Tensor]: The loss if a closure was provided.
+        """
         loss = None
         if closure is not None:
             loss = closure()

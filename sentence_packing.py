@@ -11,6 +11,16 @@ If a single sentence exceeds the max length budget (after accounting for
 special tokens) it is chunked into sliding windows (hard split) to avoid
 dropping content.
 """
+"""
+Usage
+    from sentence_packing import pack_sentences
+    packed = pack_sentences(lines, tokenizer, max_length=512, collect_stats=True)
+
+Innovations & efficiency
+    - Lightweight regex-based splitter avoids heavy dependencies while being fast
+    - Borrowing pass can move a short first sentence backward to improve pack fill
+    - Optional stats collection surfaces fill ratios and end punctuation quality
+"""
 from __future__ import annotations
 import re
 from typing import List, Iterable, Tuple, Dict, Any

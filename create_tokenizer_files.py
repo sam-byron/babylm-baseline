@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Programmatically create all necessary tokenizer files for transformers compatibility.
+Create Hugging Face-compatible tokenizer files for a WordPiece/BERT tokenizer.
 
-Generates:
- - vocab.txt (sorted by id)
- - tokenizer_config.json (BERT-compatible defaults)
- - special_tokens_map.json (auto-detected specials)
- - tokenizer.json (copied if provided and not present)
+Outputs in the checkpoint directory:
+- vocab.txt                (tokens sorted by id)
+- tokenizer_config.json    (BERT Tokenizer defaults)
+- special_tokens_map.json  (auto-detected special tokens)
+- tokenizer.json           (copied from input if not already present)
 
-Also updates config.json with an auto_map entry for AutoTokenizer so
-AutoTokenizer.from_pretrained can resolve a standard tokenizer class
-without relying on the custom config class.
+It can also patch config.json with an auto_map entry for AutoTokenizer so that
+AutoTokenizer.from_pretrained can work out-of-the-box.
 """
 
 import argparse
@@ -20,10 +19,16 @@ from tokenizers import Tokenizer as HFTokenizer
 from training_utils import generate_special_tokens_map
 
 def create_tokenizer_files(checkpoint_path: str, tokenizer_path: str = "./tokenizer.json"):
-    """
-    Create all necessary tokenizer files for transformers compatibility
+    """Create all necessary tokenizer files for transformers compatibility.
+
+    Args:
+        checkpoint_path: Directory where files will be written.
+        tokenizer_path: Path to an existing tokenizer.json (from tokenizers lib).
     """
     print(f"Creating tokenizer files in {checkpoint_path}")
+    if not os.path.exists(tokenizer_path):
+        raise FileNotFoundError(f"tokenizer_path not found: {tokenizer_path}")
+    os.makedirs(checkpoint_path, exist_ok=True)
     
     # Load your custom tokenizer
     tokenizer = HFTokenizer.from_file(tokenizer_path)
@@ -76,9 +81,7 @@ def create_tokenizer_files(checkpoint_path: str, tokenizer_path: str = "./tokeni
     print("All tokenizer files created successfully!")
 
 def update_config_for_tokenizer(checkpoint_path: str):
-    """
-    Update config.json to include tokenizer auto_map
-    """
+    """Patch config.json to include AutoTokenizer auto_map if present."""
     config_path = os.path.join(checkpoint_path, "config.json")
     
     if os.path.exists(config_path):
@@ -103,8 +106,8 @@ def update_config_for_tokenizer(checkpoint_path: str):
         print(f"Warning: {config_path} not found")
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint_path", required=True, help="Directory containing model/config.json where tokenizer files will be written")
+    ap = argparse.ArgumentParser(description="Create tokenizer files for a BERT-compatible tokenizer")
+    ap.add_argument("--checkpoint_path", required=True, help="Directory to write files (should contain config.json if you want auto_map patched)")
     ap.add_argument("--tokenizer_path", default="./tokenizer.json", help="Path to tokenizer.json from tokenizers library")
     args = ap.parse_args()
 

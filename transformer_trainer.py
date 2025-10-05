@@ -1,3 +1,25 @@
+"""
+transformer_trainer.py — Accelerate-based training loop for LTG-BERT masked LM
+
+Overview
+    Orchestrates data loading, model construction, optimizer/scheduler setup, and
+    a robust training loop with monitoring and end-of-epoch validation. Designed
+    to run under accelerate for multi-GPU with bf16 mixed precision.
+
+Usage
+    accelerate launch transformer_trainer.py --config_path model_babylm_ltg_bert.json
+
+Key components
+    - build_model: saves/loads config and initializes LtgBertForMaskedLM
+    - train_loop: accumulation-aware loop with progress bars and JSONL metrics
+    - main: wires together dataloaders, optimizer, scheduler, resume state
+
+Innovations & efficiency
+    - Sentence-aware data loader with dynamic masking to reduce precompute/storage
+    - Sub-linear LR scaling with cap to stabilize late-stage training
+    - Scheduler aligned to optimizer-update units accounting for grad accumulation
+    - Rank-0 JSONL logging and barrier-safe file writes for distributed safety
+"""
 import os
 import torch
 import json
@@ -117,6 +139,20 @@ def train_loop(
     start_epoch,
     start_step=0,
 ):
+    """Training loop over epochs with dynamic masking and monitoring.
+
+    Args:
+        accelerator: accelerate.Accelerator
+        model: LtgBertForMaskedLM instance
+        tokenizer: tokenizer with save(path)
+        train_loader, val_loader: PyTorch DataLoaders
+        optimizer: torch optimizer
+        scheduler: LR scheduler
+        config: dict-like settings
+        checkpoint_path: directory for checkpoints
+        start_epoch: resume epoch index
+        start_step: resume step within start_epoch
+    """
     # Initialize training monitor with config values
     monitoring_config = config.get("monitoring", {})
     monitor = TrainingMonitor(
@@ -408,6 +444,7 @@ def train_loop(
 
 
 def main():
+    """Entry point wiring config, loader, model, optimizer, scheduler, and loop."""
     print(torch._dynamo.list_backends())
 
     # Fast kernels (safe on Ampere+; no effect otherwise)

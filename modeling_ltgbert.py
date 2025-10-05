@@ -13,7 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" PyTorch LTG-BERT model."""
+"""
+PyTorch implementation of LTG-BERT
+
+This module defines a lightweight BERT-like encoder with:
+- Relative position bucketing attention (log-bucketed distances)
+- GeGLU feed-forward layers
+- Tied input/output embeddings for masked language modeling
+
+The classes below provide HF-compatible wrappers (LtgBertModel and task heads) so the
+model can be loaded/saved with transformers' Auto* classes when trust_remote_code is enabled.
+"""
 
 
 import math
@@ -48,6 +58,7 @@ _CONFIG_FOR_DOC = "LtgBertConfig"
 
 
 class Encoder(nn.Module):
+    """Stack of Transformer encoder layers with optional activation checkpointing."""
     def __init__(self, config, activation_checkpointing=False):
         super().__init__()
         self.layers = nn.ModuleList([EncoderLayer(config) for _ in range(config.num_hidden_layers)])
@@ -59,6 +70,7 @@ class Encoder(nn.Module):
         self.activation_checkpointing = activation_checkpointing
     
     def forward(self, hidden_states, attention_mask, relative_embedding):
+        """Return list of layerwise hidden states and attention probabilities per layer."""
         hidden_states, attention_probs = [hidden_states], []
 
         for layer in self.layers:
@@ -74,6 +86,7 @@ class Encoder(nn.Module):
 
 
 class MaskClassifier(nn.Module):
+    """Two-layer MLP head for masked language modeling with tied output weights."""
     def __init__(self, config, subword_embedding):
         super().__init__()
         self.nonlinearity = nn.Sequential(
@@ -94,6 +107,7 @@ class MaskClassifier(nn.Module):
         self.nonlinearity[-1].bias.data.zero_()
 
     def forward(self, x, masked_lm_labels=None):
+        """Optionally select only masked positions before projecting to logits."""
         if masked_lm_labels is not None:
             x = torch.index_select(x.flatten(0, 1), 0, torch.nonzero(masked_lm_labels.flatten() != -100).squeeze())
         x = self.nonlinearity(x)
@@ -101,6 +115,7 @@ class MaskClassifier(nn.Module):
 
 
 class EncoderLayer(nn.Module):
+    """Self-attention followed by feed-forward with residual connections."""
     def __init__(self, config):
         super().__init__()
         self.attention = Attention(config)
@@ -114,6 +129,7 @@ class EncoderLayer(nn.Module):
 
 
 class GeGLU(nn.Module):
+    """GELU-gated linear unit as in GeGLU: split features and gate with GELU."""
     def forward(self, x):
         x, gate = x.chunk(2, dim=-1)
         x = x * gelu_new(gate)
@@ -121,6 +137,7 @@ class GeGLU(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """LayerNorm -> Linear(2*intermediate) -> GeGLU -> LayerNorm -> Linear(hidden) -> Dropout."""
     def __init__(self, config):
         super().__init__()
         self.mlp = nn.Sequential(
@@ -143,6 +160,10 @@ class FeedForward(nn.Module):
 
 
 class MaskedSoftmax(torch.autograd.Function):
+    """
+    Fused masked softmax with a custom backward that uses transformers' softmax_backward_data.
+    Expects a boolean mask where True marks masked (invalid) positions.
+    """
     @staticmethod
     def forward(self, x, mask, dim):
         self.dim = dim
@@ -160,6 +181,7 @@ class MaskedSoftmax(torch.autograd.Function):
 
 
 class Attention(nn.Module):
+    """Multi-head attention with relative position biases using log-bucketed distances."""
     def __init__(self, config):
         super().__init__()
 
@@ -190,6 +212,7 @@ class Attention(nn.Module):
         self.initialize()
 
     def make_log_bucket_position(self, relative_pos, bucket_size, max_position):
+        """Map relative positions to log-scaled buckets with sign preserving near range exactly."""
         sign = torch.sign(relative_pos)
         mid = bucket_size // 2
         abs_pos = torch.where((relative_pos < mid) & (relative_pos > -mid), mid - 1, torch.abs(relative_pos).clamp(max=max_position - 1))
@@ -262,6 +285,7 @@ class Attention(nn.Module):
 
 
 class Embedding(nn.Module):
+    """Word embedding plus learned relative positional embeddings with LayerNorm and dropout."""
     def __init__(self, config):
         super().__init__()
         self.hidden_size = config.hidden_size

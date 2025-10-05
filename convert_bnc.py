@@ -1,3 +1,34 @@
+"""
+convert_bnc.py — Convert BNC XML files to normalized markdown-like text
+
+Overview
+    Traverses British National Corpus (BNC) XML files and writes readable .md files,
+    preserving basic structure (titles, chapters, paragraphs, quotes, speeches, lists)
+    while performing light normalization with MosesPunctNormalizer and ftfy.
+
+Usage
+    python convert_bnc.py
+
+Inputs
+    - SOURCE_FOLDER (str): Root of BNC XML tree (default: "BNC_raw/Texts").
+    - ./data/first-names.txt: List of names used for anonymizing unknown speakers.
+
+Outputs
+    - TARGET_FOLDER (str): Base output path (default: "raw_corpus/bnc"), preserving the
+        last two directory levels from the BNC structure. Emits <...>.md files.
+
+Key functions
+    - process_written_part/process_spoken_part: Modality-aware processing of XML nodes.
+    - clean/add_whitespace/fix_double_quotes: Conservative normalization helpers that
+        avoid overly aggressive rewrites if conditions are uncertain.
+    - remove_excess_newlines_and_count: Final pass to compact blank lines and count words.
+
+Innovations & efficiency
+    - Conservative quote and punctuation spacing that bails out when unsafe, preventing
+        text damage while improving consistency.
+    - Streaming-style XML traversal avoids holding large trees fully in memory.
+    - Separate handling for written vs. spoken text with simple speaker formatting.
+"""
 import os
 import glob
 import pathlib

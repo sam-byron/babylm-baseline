@@ -1,3 +1,11 @@
+"""
+Metrics utilities for training-time monitoring.
+
+This module provides helpers to track per-epoch distributions (sequence lengths,
+truncation rate, uniqueness) and compute per-step metrics such as MLM accuracy,
+masking split, throughput, and gradient statistics for logging.
+"""
+
 import time
 from typing import Dict, Any, Tuple
 import torch
@@ -6,7 +14,15 @@ from thin_logger import compute_protected_ids
 
 
 def start_epoch_tracking(config: dict, tokenizer) -> Dict[str, Any]:
-    """Initialize per-epoch tracking state."""
+    """Initialize and return a dictionary for per-epoch tracking state.
+
+    Keys include:
+      - seq_len_cfg: configured sequence length budget
+      - length_hist: histogram of effective lengths in [0..seq_len_cfg]
+      - truncation_hits: count of samples reaching the max length
+      - unique_hashes: capped set used to estimate repeats
+      - protected_ids: structural token ids to exclude from masking leak stats
+    """
     seq_len_cfg = int(config.get("seq_length", 128))
     try:
         mask_token_id = tokenizer.token_to_id("[MASK]")
@@ -62,9 +78,10 @@ def compute_train_step_metrics(
     last_log_time: float,
     prev_step_end: float,
 ) -> Tuple[Dict[str, Any], float, float]:
-    """
-    Compute step-level metrics (MLM acc, throughput, timing, masking split, protected leak).
-    Returns (metrics_dict, new_last_log_time, new_prev_step_end).
+    """Compute step-level metrics for logging.
+
+    Returns:
+        (metrics: Dict[str, Any], new_last_log_time: float, new_prev_step_end: float)
     """
     with torch.no_grad():
         labels = batch["labels"]

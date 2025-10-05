@@ -1,3 +1,28 @@
+"""
+data_loader.py — Dataset and dataloader factories for pretraining
+
+Overview
+    Provides utilities to load pre-generated training blocks or to build
+    sentence-aware datasets for Masked Language Modeling (MLM). Includes a
+    ChunkedDataset for preblocked tensors and a sentence-aware path that
+    leverages dynamic masking collators.
+
+Usage
+    from data_loader import data_loader
+    train_loader, val_loader, test_loader, collate_fn, total_tokens = data_loader(config, tokenizer, cache_path)
+
+Config keys (common)
+    - block_size, batch_size, mask_p, random_p, keep_p
+    - use_sentence_aware (bool): prefer sentence-aware dataset
+    - train_frac, val_frac, data_split_seed
+
+Innovations & efficiency
+    - Preblocked mode indexes rows directly from [N, block_size] tensors for near O(1)
+        access and minimal CPU overhead.
+    - Index maps cached under cache_index/ with stable hashing to skip recomputation.
+    - Sentence-aware dataset improves syntactic learning by packing boundaries and
+        using a dynamic collator to avoid storing multiple masked variants.
+"""
 from datetime import datetime
 from collections import OrderedDict
 import gc
@@ -39,6 +64,11 @@ class C:
 
 STRUCTURAL_TOKENS = ["[PAD]","[UNK]","[CLS]","[SEP]","[MASK]","[PAR]","[TAB]","[DOC]","[EOD]","[SPK]"]
 def get_special_token_ids(tokenizer):
+    """Return IDs of structural tokens present in a tokenizer.
+
+    The set includes PAD/UNK/CLS/SEP/MASK and extra structural markers like
+    [PAR]/[TAB]/[DOC]/[EOD]/[SPK] if the tokenizer defines them.
+    """
     ids = []
     for tok in STRUCTURAL_TOKENS:
         tid = tokenizer.token_to_id(tok)
@@ -214,6 +244,14 @@ class ChunkedDataset(Dataset):
 
 # Update the data_loader function to use sentence-aware dataset when available
 def data_loader(config, tokenizer, cache_path):
+    """Create train/val/test loaders and collate function.
+
+    If config.use_sentence_aware is True (default), builds a SentenceAwareDataset
+    with dynamic masking. Otherwise, future extension can return preblocked loaders.
+
+    Returns
+        (train_loader, val_loader, test_loader, collate_fn, total_tokens_train)
+    """
     block_size = config["block_size"]
     batch_size = config["batch_size"]
     

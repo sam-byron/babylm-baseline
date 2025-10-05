@@ -1,4 +1,39 @@
 #!/usr/bin/env python3
+"""
+blimp_sanity.py — Pseudo log-likelihood (PLL) sanity check on BLiMP and BLiMP-supplement
+
+Overview
+        Evaluates a masked language model (BERT-style) using pseudo log-likelihood:
+        mask one position at a time and sum the log-prob of the original token. The
+        script supports Hugging Face BLiMP subsets and an optional BLiMP-supplement
+        JSONL corpus with sentence_good/sentence_bad pairs.
+
+Usage
+        python blimp_sanity.py --model_path <checkpoint_dir> \
+                [--subset SUBJECT_VERB_AGREEMENT] [--max_examples 200] \
+                [--device cuda] [--split auto|train|test|validation] \
+                [--normalize none|per_token] [--dump 5] \
+                [--benchmark blimp|blimp_supplement|both] \
+                [--supplement_dir /path/to/jsonl] [--supplement_task task_name]
+
+Arguments (selected)
+        --model_path            Path to a directory with config.json + weights (and tokenizer)
+        --subset                Single BLiMP subset; if omitted, runs all available
+        --max_examples          Cap examples per subset/task for speed
+        --normalize             "per_token" divides total PLL by token count (length norm)
+        --dump                  Save worst-K examples by gap for diagnostics
+        --benchmark             Which benchmark(s) to run: BLiMP, supplement, or both
+        --supplement_dir        Folder containing <task>.jsonl files for supplement
+        --supplement_task       Only run this supplement task name (filename stem)
+
+Innovations & efficiency
+        - Vocab clamp: if tokenizer vocab > model vocab, IDs ≥ model.vocab_size are mapped
+            to [UNK] to avoid index errors when tokenizers/models mismatch.
+        - Two loading paths: tries AutoModelForMaskedLM; falls back to manual import of the
+            saved modeling/config files for custom architectures.
+        - Per-token normalization option reports PLL per token for length-robust comparisons.
+        - Worst-K example dump shows token-level contributors for quick error analysis.
+"""
 import argparse, math, os, csv, json
 from typing import List, Tuple, Dict, Any, Optional
 import torch
@@ -7,6 +42,11 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
 from tqdm import tqdm
 
 def pick_split(dataset_name: str, subset: str, split_arg: str):
+    """Pick a valid split for a HF dataset subset.
+
+    If split_arg != "auto", returns it verbatim; else probes validation, test, then train.
+    Raises if none are available.
+    """
     if split_arg != "auto":
         return split_arg
     for sp in ("validation", "test", "train"):
@@ -18,6 +58,19 @@ def pick_split(dataset_name: str, subset: str, split_arg: str):
     raise RuntimeError(f"No split found for {dataset_name}/{subset} (tried validation/test/train)")
 
 def pll_score_with_tokens(model, tok, text: str, device: torch.device, normalize: str = "none"):
+    """Compute pseudo log-likelihood for one text and return details.
+
+    Steps: tokenize text; for positions 1..L-2 (skip specials) mask token i; compute
+    log softmax and collect the log-probability of the original token. Sum over i.
+
+    Safety: If tokenizer produces IDs not present in model's vocab, clamp them to UNK
+    to avoid out-of-range indexing.
+
+    Returns:
+        total (float): summed (or per-token) PLL score
+        contribs (List[tuple]): per-position contributions (pos, token_id, logp, token_str)
+        enc (BatchEncoding): tokenized batch encoding for downstream stats
+    """
     enc = tok(text, return_tensors="pt", add_special_tokens=True)
     input_ids = enc["input_ids"]
     # Safety: clamp token ids to model vocab size if tokenizer vocab > model vocab
@@ -69,6 +122,11 @@ def find_blimp_supplement_dir(explicit: Optional[str] = None) -> Optional[str]:
     Preference order: explicit -> ./blimp_supplement -> ../evaluation-pipeline-2024-fresh/evaluation_data/supplement_filtered
     -> ./evaluation-pipeline-2024-fresh/evaluation_data/supplement_filtered
     """
+    """Return a directory path containing BLiMP-supplement JSONL files.
+
+    Accepts an explicit path (dir or file in dir). Otherwise searches common
+    local locations near the repository root.
+    """
     if explicit:
         if os.path.isdir(explicit):
             return explicit
@@ -88,6 +146,7 @@ def find_blimp_supplement_dir(explicit: Optional[str] = None) -> Optional[str]:
     return None
 
 def get_available_supplement_tasks(supp_dir: str) -> List[str]:
+    """List available task names (filename stems) from a supplement directory."""
     tasks: List[str] = []
     try:
         for fn in os.listdir(supp_dir):
@@ -107,7 +166,11 @@ def run_supplement_subset(
     normalize: str,
     dump: int = 0,
 ):
-    """Run evaluation on a BLiMP supplement JSONL file with sentence_good/sentence_bad pairs."""
+    """Run PLL evaluation on a supplement JSONL file with sentence_good/sentence_bad pairs.
+
+    Returns a dict with fields: task, n, acc, oov_rate, normalize, examples, source
+    where acc is the proportion of pairs with PLL(good) > PLL(bad).
+    """
     if not os.path.isfile(jsonl_path):
         raise FileNotFoundError(f"Supplement file not found: {jsonl_path}")
     rows_raw: List[Dict[str, Any]] = []
@@ -172,6 +235,7 @@ def run_supplement_subset(
     }
 
 def ensure_subsets_list(dataset_name: str) -> List[str]:
+    """Return BLiMP subset names, falling back to a static list if necessary."""
     try:
         return get_dataset_config_names(dataset_name)
     except Exception:
@@ -186,6 +250,10 @@ def ensure_subsets_list(dataset_name: str) -> List[str]:
         ]
 
 def run_subset(model, tok, subset: str, split: str, device: torch.device, limit: int, normalize: str, dump: int = 0):
+    """Run PLL evaluation on one BLiMP subset split.
+
+    Returns a dict with fields: subset, split, n, acc, oov_rate, normalize, examples.
+    """
     ds = load_dataset("blimp", subset, split=split)
     n = max(limit, len(ds)) if limit > 0 else len(ds)
     wins = 0
@@ -234,6 +302,12 @@ def run_subset(model, tok, subset: str, split: str, device: torch.device, limit:
     }
 
 def main():
+    """CLI entry point to evaluate a model on BLiMP and/or BLiMP-supplement.
+
+    Example
+        python blimp_sanity.py --model_path ./model_vault/model_bl_bert_ltgds_regular \
+            --benchmark both --max_examples 200 --normalize per_token --dump 5
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--model_path", required=True)
     ap.add_argument("--subset", default=None, help="If unset, run all BLiMP subsets available")

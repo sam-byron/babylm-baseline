@@ -1,3 +1,27 @@
+"""
+mlm_dataset.py — Masking strategies and datasets for MLM pretraining
+
+Overview
+    Contains several masking strategies (Subword, Span, WholeWord) compatible with
+    BERT/RoBERTa-style training, plus a SentenceAwareDataset that loads tokenized
+    sentences from chunked PT files and combines them into fixed-length sequences.
+
+Usage
+    from mlm_dataset import SentenceAwareDataset
+    ds = SentenceAwareDataset(cache_path, tokenizer, seq_length=512)
+
+Key components
+    - AbstractMaskingStrategy and concrete implementations
+    - AbstractMlmDataset and derived datasets (Document, Order, Basic)
+    - SentenceAwareDataset for improved boundary-aware batching
+
+Innovations & efficiency
+    - Protected ID mechanism to avoid masking structural tokens even when special IDs
+        are non-contiguous.
+    - Robust chunk loading helper to tolerate mixed formats and reduce memory spikes.
+    - Multi-sentence sequence construction with cached padding tensors and truncation
+        for occasional long sentences.
+"""
 import numpy as np
 import torch
 from torch.utils.data import Dataset

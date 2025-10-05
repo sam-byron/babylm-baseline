@@ -1,3 +1,27 @@
+"""
+dynamic_collator.py — Dynamic MLM masking collator reusing existing strategies
+
+Overview
+    Implements a RoBERTa-style dynamic masking collate function that delegates
+    the masking decisions to the proven strategies in mlm_dataset.py
+    (SpanMaskingStrategy, SubwordMaskingStrategy, WholeWordMaskingStrategy).
+
+Usage
+    from dynamic_collator import create_dynamic_collator
+    collate_fn = create_dynamic_collator(config, tokenizer)
+
+Key args
+    - mask_p, random_p, keep_p
+    - masking_strategy: "span" | "subword" | "whole_word"
+    - max_span_length (when masking_strategy == "span")
+
+Innovations & efficiency
+    - Reuses existing, well-tested masking strategies to ensure consistent behavior
+        between static and dynamic pipelines.
+    - Builds an explicit protected_ids list for structural tokens ([CLS]/[SEP]/[DOC]/...),
+        preventing accidental masking of control tokens even when special IDs are not contiguous.
+    - Pads on-the-fly and constructs attention masks in one pass.
+"""
 import torch
 import random
 import numpy as np
@@ -135,8 +159,12 @@ class DynamicMaskingCollator:
             padded_input_ids.append(masked_tokens)
             all_labels.append(labels)
             
-            # Create attention mask from actual PAD positions (1 for real tokens, 0 for padding)
-            attention_mask = (padded_seq != self.pad_token_id).long()
+            # Create attention mask (1 for real tokens, 0 for padding)
+            if padding_length > 0:
+                attention_mask = torch.cat([torch.ones(len(seq), dtype=torch.long), 
+                                          torch.zeros(padding_length, dtype=torch.long)])
+            else:
+                attention_mask = torch.ones(len(seq), dtype=torch.long)
             attention_masks.append(attention_mask)
         
         # Stack into batch tensors
@@ -151,7 +179,16 @@ class DynamicMaskingCollator:
         }
 
 def create_dynamic_collator(config, tokenizer):
-    """Factory function to create a dynamic masking collator."""
+    """Factory function to create a dynamic masking collator.
+
+    Args:
+        config: Training/runtime config containing mask_p/random_p/keep_p and strategy
+        tokenizer: Tokenizer with token_to_id implemented
+
+    Returns:
+        Callable suitable as PyTorch DataLoader collate_fn returning a batch dict
+        with input_ids, attention_mask, labels (with -100 on unmasked positions).
+    """
     masking_strategy = config.get("masking_strategy", "span")
     mlm_probability = config.get("mask_p", 0.15)
     random_probability = config.get("random_p", 0.1)

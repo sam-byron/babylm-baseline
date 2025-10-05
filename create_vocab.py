@@ -1,3 +1,30 @@
+"""
+create_vocab.py — Shard BNC text, train WordPiece vocab, and tokenize shards
+
+Overview
+    End-to-end preprocessing utility for BERT-style pretraining data:
+        1) Split a large markdown corpus into train/valid shards
+        2) Train a WordPiece tokenizer (tokenizers library)
+        3) Tokenize documents into arrays and save compressed pickles
+
+Usage
+    python create_vocab.py
+
+    The script uses default paths under ./data/pretrain. Adjust constants or
+    adapt functions for custom pipelines.
+
+Functions
+    - create_directories(data_folder): Prepare output folders
+    - shard_data(source_file, shard_folder, n_train_shards, n_valid_shards): Simple sharding
+    - create_wordpiece_vocab(train_file, vocab_file, vocab_size): Train and persist WordPiece
+    - parse_documents(file_path): Lightweight document and sentence splitting
+    - tokenize_documents(input_file, vocab_file, output_file): Encode and dump to gzip pickle
+
+Innovation & efficiency
+    - Uses the fast tokenizers library backend for training and encoding.
+    - Stores tokenized documents as numpy arrays in gzip pickles to reduce disk footprint
+        and speed up subsequent loading.
+"""
 import os
 import json
 import pickle
@@ -9,13 +36,27 @@ from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, trainers
 from tqdm import tqdm
 
 def create_directories(data_folder):
-    """Create necessary directories"""
+    """Create necessary directories.
+
+    Args:
+        data_folder: Base path (expects shard/ and tokenized/ subfolders to be created)
+    """
     Path(f"{data_folder}/shard").mkdir(parents=True, exist_ok=True)
     Path(f"{data_folder}/tokenized").mkdir(parents=True, exist_ok=True)
     print(f"Created directories in {data_folder}")
 
 def shard_data(source_file, shard_folder, n_train_shards, n_valid_shards):
-    """Split data into train/valid shards"""
+    """Split a large markdown file into train/valid shards.
+
+    Args:
+        source_file: Path to combined markdown file
+        shard_folder: Output folder for per-split shard files
+        n_train_shards: Number of train shards
+        n_valid_shards: Number of valid shards
+
+    Returns:
+        True on success, False if input is missing.
+    """
     print(f"Sharding data from {source_file}...")
     
     if not os.path.exists(source_file):
@@ -70,7 +111,13 @@ def shard_data(source_file, shard_folder, n_train_shards, n_valid_shards):
     return True
 
 def create_wordpiece_vocab(train_file, vocab_file, vocab_size=2**14):
-    """Create WordPiece vocabulary"""
+    """Create and save a WordPiece vocabulary.
+
+    Args:
+        train_file: Text file for training the tokenizer
+        vocab_file: Output path for tokenizer JSON
+        vocab_size: Target vocabulary size (default: 16384)
+    """
     print(f"Creating vocabulary from {train_file}...")
     
     if not os.path.exists(train_file):
@@ -102,7 +149,10 @@ def create_wordpiece_vocab(train_file, vocab_file, vocab_size=2**14):
     return True
 
 def parse_documents(file_path):
-    """Parse file into documents and sentences"""
+    """Parse a markdown file into documents and sentences.
+
+    Returns a list of documents, where each document is a list of sentences.
+    """
     documents = []
     
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -133,7 +183,13 @@ def parse_documents(file_path):
     return documents
 
 def tokenize_documents(input_file, vocab_file, output_file):
-    """Tokenize documents and save as pickle"""
+    """Tokenize documents and save as compressed pickle.
+
+    Args:
+        input_file: Path to a shard file to encode
+        vocab_file: Path to tokenizer JSON
+        output_file: Destination .pickle.gz with list[List[np.array]]
+    """
     print(f"Tokenizing {input_file}...")
     
     if not os.path.exists(vocab_file):

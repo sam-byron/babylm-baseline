@@ -1,3 +1,20 @@
+"""
+tokenizer.py — Train a WordPiece tokenizer with extended special tokens
+
+Overview
+    Initializes and trains a WordPiece tokenizer with additional structural tokens
+    such as [DOC], [EOD], and [SPK]. Provides an F95 utility to compute the token
+    frequency threshold covering 95% of token occurrences.
+
+Usage
+    python tokenizer.py --data-dir data/pretrain/bnc --vocab_path data/pretrain/bpe.json \
+                                            --vocab_size 16384 --min_frequency 10
+
+Innovations & efficiency
+    - ByteLevel pre-tokenization and decoding for robust raw text handling.
+    - Reproducibility manifest (sha256, args) saved alongside the tokenizer.
+    - Lightweight streaming over .md files to avoid loading entire corpora in memory.
+"""
 import argparse
 from collections import Counter
 import glob
@@ -39,8 +56,9 @@ def initialize_tokenizer(args):
 def calculate_f95(tokenizer, line_iter):
     """Compute the 95% cumulative frequency threshold token count.
 
-    We build a frequency table of emitted tokens (post-tokenization). This is
-    an expensive pass; it streams the iterator fully.
+    Builds a frequency table of emitted tokens (post-tokenization) by streaming
+    an iterator of lines. Returns the frequency value at the 95th percentile and
+    the full sorted frequency list.
     """
     counter = Counter()
     total_lines = 0

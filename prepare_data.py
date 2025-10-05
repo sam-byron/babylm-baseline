@@ -1,3 +1,26 @@
+"""
+prepare_data.py — Build fixed-size training blocks from raw BNC markdown
+
+Overview
+    Streams raw .md files, injects [DOC]/[EOD] boundaries, optionally tags speakers,
+    packs sentences into samples close to a token budget, then emits fixed-size blocks
+    saved as chunk*.pt tensors with optional per-file metadata.
+
+Usage
+    python prepare_data.py --config_path model_babylm_ltg_bert.json [--sanitize]
+
+Config keys (selected)
+    - cache_path: output folder for chunk*.pt
+    - block_size: block length (tokens)
+    - packing_max_len: max tokens per packed segment (defaults to block_size)
+    - blocks_per_file: how many blocks per output PT file
+    - oversize_policy: split|truncate|skip|raise strategy
+
+Innovations & efficiency
+    - Packs to block_size directly to avoid a post-splitting pass
+    - Buffered emission with blocks_per_file for large I/O efficiency
+    - Optional sanitize pass to quickly detect and remove corrupted chunk files in parallel
+"""
 import glob
 import os
 import re
